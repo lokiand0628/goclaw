@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -52,6 +53,8 @@ type MultiAgentGetter struct {
 
 // GetStatus 实现 tools.AgentGetter 接口
 func (m *MultiAgentGetter) GetStatus(ctx context.Context, agentID, sessionID string) string {
+	log.Printf("[MultiAgentGetter] GetStatus request for agentID=%q sessionID=%q", agentID, sessionID)
+
 	// 尝试通过 ID 获取代理
 	a, ok := m.Manager.Get(agentID)
 	if !ok {
@@ -67,5 +70,7 @@ func (m *MultiAgentGetter) GetStatus(ctx context.Context, agentID, sessionID str
 		return fmt.Sprintf("无法获取系统状态：未找到 ID 为 %q 的代理实例", agentID)
 	}
 
+	// [DEBUG] Log success
+	// log.Printf("[MultiAgentGetter] Found agent %q (id=%s), returning status summary", a.name, a.id)
 	return GetStatusSummary(a, ctx, sessionID)
 }

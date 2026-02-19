@@ -366,6 +366,10 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 
 		// 记录 AI 响应
 		if txt := textBuffer.String(); txt != "" {
+			if stopReason == "length" || stopReason == "max_tokens" {
+				txt += "\n\n*(响应因长度限制被截断)*"
+				finalResponse.WriteString("\n\n*(响应因长度限制被截断)*")
+			}
 			log.Printf("[%s] 迭代=%d 文本=%q 停止原因=%s", a.name, iter, truncate(txt, 120), stopReason)
 		} else if len(toolCalls) > 0 {
 			log.Printf("[%s] 迭代=%d %d 个工具调用, 停止原因=%s", a.name, iter, len(toolCalls), stopReason)
@@ -398,6 +402,8 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 			resultsBytes, _ := json.Marshal(toolResults)
 			if err := a.store.AddComplexMessage(ctx, sessionID, "user", string(resultsBytes), "json"); err != nil {
 				log.Printf("代理 %s: 持久化工具结果失败: %v", a.id, err)
+			} else {
+				log.Printf("[%s] 工具执行完成: %d 个结果已保存", a.name, len(toolResults))
 			}
 
 			// 将工具结果作为用户消息附加

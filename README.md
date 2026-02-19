@@ -1,47 +1,67 @@
 # 🤖 goclaw (Clawdbot)
 
-**goclaw** 是 AI 智能体平台 [OpenClaw](https://github.com/idootop/openclaw) 的高性能 Go 语言实现版本。它旨在提供一个轻量级、响应迅速且易于部署的 Agent 核心引擎。
+**goclaw** 是 AI 智能体平台 [OpenClaw](https://github.com/idootop/openclaw) 的高性能 Go 语言原生实现版本。它旨在提供一个**轻量级**、**响应迅速**且**零依赖**的 Agent 核心引擎，专为云原生环境与高并发场景打造。
 
-## 🚀 为什么选择 goclaw？
+## 🆚 架构对比：Goclaw vs OpenClaw
 
-虽然 OpenClaw 提供了极其丰富的生态和 UI，但 **goclaw** 专注于以下核心优势：
+我们基于不同的技术栈构建了两个版本的核心引擎，它们各有千秋，适用于不同的场景：
 
-1.  **单二进制部署**：基于 Go 语言特性，编译后仅需一个可执行文件即可运行，无需预装 Node.js 或管理复杂的 `npm/python` 依赖包。
-2.  **极致性能**：原生 Go 协程并发处理多渠道消息，在高并发场景下内存占用更低，响应速度更快。
-3.  **MiniMax M2.5 深度适配**：内置对 MiniMax 系列模型 **thinking blocks（思考链）** 的流式解析与持久化支持，确保长上下文对话的逻辑连贯性。
-4.  **安全围栏**：静态注册的工具系统与内置的路径拦截机制，为执行 Shell 命令和文件操作提供了可靠的安全保障。
+| 维度 | goclaw (Go) | OpenClaw (Node.js) |
+| :--- | :--- | :--- |
+| **核心定位** | **高性能运行时** (Runtime) | **全栈解决方案** (Full Stack) |
+| **并发性能** | 🚀 **极高** (Goroutine 原生并发) | ⚠️ 一般 (单线程 Event Loop) |
+| **资源占用** | 🟢 **极低** (< 20MB 内存) | 🟡 中等 (> 100MB 内存) |
+| **部署难度** | ✅ **简单** (单二进制文件，无依赖) | ❌ 复杂 (需 Node/Python 环境) |
+| **二次开发** | ⚠️ 门槛较高 (需掌握 Go 语言) | ✅ **门槛低** (JavaScript/TS 普及度高) |
+| **生态插件** | 🔧 核心插件内置，扩展需重新编译 | 🧩 插件生态丰富，动态加载更容易 |
+| **适用场景** | **高并发微服务、边缘计算、私有化部署** | 快速原型开发、全栈应用整合 |
+
+**总结**：如果您追求极致的性能、稳定的后端服务或方便的容器化部署，**goclaw** 是更好的选择；如果您需要快速修改业务逻辑或利用丰富的前端生态，原版 **OpenClaw** 可能更适合您。
 
 ## 🔥 核心特性
 
-- **多渠道连接**：内置对 Telegram、飞书（Feishu）、企业微信等主流通讯平台的原生支持。
-- **智能体循环**：完整的 Agent 决策循环，支持工具调用（Function Calling）、多轮迭代规划。
-- **结构化记忆**：
-    - **数据库层**：使用 SQLite 对每一轮对话进行完整持久化。
-    - **工作区层**：通过 `IDENTITY.md`、`SOUL.md`、`MEMORY.md` 等预定义的 Markdown 模板管理 Agent 的核心逻辑与长期共识。
-- **流式 SSE 优化**：针对 Anthropic/Minimax 协议优化的 SSE 解析引擎，极大降低了首字输出延迟（TTFT）。
+### 🧠 强大的认知内核
+*   **通用协议支持**: 完美兼容 **OpenAI** 与 **Anthropic** 两大主流协议标准。
+    *   无论是接入 GPT 系列、Claude 系列，还是国产的 DeepSeek、通义千问、MiniMax，只需配置对应的 API Key 与 BaseURL 即可直接使用。
+*   **思维链 (CoT) 深度适配**: 针对支持 "Thinking" 过程的模型，原生支持其思维链的流式解析与展示，确保复杂任务的逻辑连贯性。
+*   **自省能力**: 内置系统级感知工具，Agent 能够实时获知自身的运行状态、版本信息及配置环境。
 
-## 📂 项目结构
+### 💬 全渠道原生接入
+*   **即时通讯**: 内置 Telegram、飞书 (Feishu)、钉钉 (DingTalk)、企业微信 (WeCom) 适配器。
+*   **消息归一化**: 无论来自哪个渠道的消息，都会被转换为统一的内部事件结构。
 
-- `cmd/`: 系统入口与启动逻辑。
-- `internal/agent/`: Agent 核心决策循环逻辑。
-- `internal/ai/`: 与 LLM 提供商交互的协议实现层。
-- `internal/channels/`: 与各平台通讯渠道的适配层。
-- `internal/tools/`: 受保护的本地工具箱实现。
-- `workspace/`: Agent 的独立运行空间，包含性格定义、近期日志与工具偏好。
+### 🛡️ 企业级安全围栏
+*   **沙盒执行环境**: 内置的 Shell与文件操作工具均受安全策略管控，支持严格的路径白名单。
+*   **记忆持久化**: 采用 SQLite 本地数据库进行会话存储，数据完全私有化。
 
 ## 🛠️ 快速上手
 
-1. **配置环境**：
-   将 `.env.example` 复制并重命名为 `.env`，填入相应的 API Key 与配置。
-2. **编译运行**：
-   ```bash
-   go build -o clawdbot ./cmd/clawdbot/
-   ./clawdbot start
-   ```
+### 1. 准备配置
+复制配置文件模板：
+```bash
+cp .env.example .env
+```
+根据注释填入你的 LLM 供应商 API Key。
 
-## 🛡️ 安全性说明
+### 2. 编译运行
+**macOS / Linux**:
+```bash
+# 编译生成可执行文件
+go build -o clawdbot ./cmd/clawdbot/
 
-由于 goclaw 具备执行系统命令（bash）的能力，在生产环境中，强烈建议将本服务运行在 **Docker** 容器或其他隔离沙盒中。
+# 启动服务
+./clawdbot start
+```
+
+**Docker 方式**:
+```bash
+docker-compose up -d
+```
+
+### 3. 使用指令
+在连接的聊天窗口中（如 Telegram）：
+*   `/status` - 查看当前系统状态与模型信息
+*   `/clear` - 重置当前对话记忆
 
 ---
-*本项目为 Go 开发者提供了一个轻量且强大的人工智能 Agent 开发底座。*
+*Powered by Golang & OpenClaw Architecture*
