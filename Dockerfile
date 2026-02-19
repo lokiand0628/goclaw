@@ -24,7 +24,8 @@ WORKDIR /app
 COPY --from=builder /app/goclaw .
 
 # Install runtime dependencies (certificates, timezone, bash, and GIT for backup)
-RUN apk add --no-cache ca-certificates tzdata bash git
+RUN apk add --no-cache ca-certificates tzdata bash git && \
+    git config --system --add safe.directory '*'
 
 # Copy default assets if needed (though init usually handles this, binary has embeds)
 # COPY --from=builder /app/.env.example .

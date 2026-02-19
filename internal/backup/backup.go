@@ -66,10 +66,18 @@ func (m *Manager) Checkpoint() error {
 
 	tag := fmt.Sprintf("checkpoint-%s", time.Now().Format("20060102T150405"))
 
-	m.git("add", "-A")
-	m.git("commit", "-m", "checkpoint: "+time.Now().Format(time.RFC3339), "--allow-empty")
-	m.git("tag", "-f", "last-good")
-	m.git("tag", tag)
+	if err := m.git("add", "-A"); err != nil {
+		log.Printf("backup: add failed: %v", err)
+	}
+	if err := m.git("commit", "-m", "checkpoint: "+time.Now().Format(time.RFC3339), "--allow-empty"); err != nil {
+		log.Printf("backup: commit failed: %v", err)
+	}
+	if err := m.git("tag", "-f", "last-good"); err != nil {
+		log.Printf("backup: tag last-good failed: %v", err)
+	}
+	if err := m.git("tag", tag); err != nil {
+		log.Printf("backup: tag %s failed: %v", tag, err)
+	}
 
 	// Prune old checkpoints
 	if err := m.pruneOldCheckpoints(); err != nil {
@@ -187,8 +195,11 @@ func (m *Manager) pruneOldCheckpoints() error {
 
 	toDelete := checkpoints[m.maxVersions:]
 	for _, tag := range toDelete {
-		m.git("tag", "-d", tag)
-		log.Printf("backup: deleted old checkpoint %s", tag)
+		if err := m.git("tag", "-d", tag); err != nil {
+			log.Printf("backup: failed to delete old checkpoint %s: %v", tag, err)
+		} else {
+			log.Printf("backup: deleted old checkpoint %s", tag)
+		}
 	}
 	return nil
 }
@@ -208,6 +219,9 @@ func (m *Manager) gitOutput(args ...string) (string, error) {
 	cmd.Dir = m.workspaceRoot
 	out, err := cmd.Output()
 	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("git %v: %w (stderr: %s)", args, err, string(exitErr.Stderr))
+		}
 		return "", err
 	}
 	return string(out), nil
