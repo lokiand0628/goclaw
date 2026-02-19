@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -48,12 +49,12 @@ type ModelsConfig struct {
 
 // Provider 定义从 ENV 解析的 provider 配置
 type Provider struct {
-	Name           string
-	BaseURL        string
-	APIKey         string
-	Model          string
-	APIType        string // "anthropic" 或 "openai"
-	MaxContext     int    // 上下文窗口，0 表示使用内置预设
+	Name       string
+	BaseURL    string
+	APIKey     string
+	Model      string
+	APIType    string // "anthropic" 或 "openai"
+	MaxContext int    // 上下文窗口，0 表示使用内置预设
 }
 
 // ProviderConfig 是旧版配置结构，保留用于兼容性
@@ -427,6 +428,10 @@ func (c *Config) ListProviders() []*Provider {
 	for _, p := range c.providers {
 		list = append(list, p)
 	}
+	// 排序以保证确定性
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].Name < list[j].Name
+	})
 	return list
 }
 
@@ -443,9 +448,15 @@ func (c *Config) DefaultProvider() (*Provider, bool) {
 		}
 	}
 
-	// 返回第一个
-	for _, p := range c.providers {
-		return p, true
+	// 如果没有设置默认值，按字母顺序返回第一个
+	var keys []string
+	for k := range c.providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	if len(keys) > 0 {
+		return c.providers[keys[0]], true
 	}
 	return nil, false
 }

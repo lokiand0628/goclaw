@@ -23,6 +23,7 @@ type Agent struct {
 	id            string
 	name          string
 	provider      ai.Provider
+	providerID    string // 新增：记录初始化时使用的 provider ID
 	store         store.Store
 	registry      *tools.Registry
 	loader        loaderIface
@@ -43,6 +44,7 @@ type Config struct {
 	ID            string
 	Name          string
 	Provider      ai.Provider
+	ProviderID    string // 新增：初始化使用的 provider ID
 	Store         store.Store
 	Registry      *tools.Registry
 	Loader        loaderIface
@@ -62,6 +64,7 @@ func New(cfg Config) *Agent {
 		id:               cfg.ID,
 		name:             cfg.Name,
 		provider:         cfg.Provider,
+		providerID:       cfg.ProviderID,
 		store:            cfg.Store,
 		registry:         cfg.Registry,
 		loader:           cfg.Loader,
@@ -164,19 +167,9 @@ func (a *Agent) resolveProvider(ctx context.Context) (ai.Provider, string, strin
 		log.Printf("[%s] resolveProvider: 未从 cfg 获取到 provider=%s", a.name, setting.ProviderID)
 	}
 
-	// 2. 使用默认 provider
-	if p, ok := a.cfg.DefaultProvider(); ok {
-		ctxLimit := p.MaxContext
-		if ctxLimit <= 0 {
-			ctxLimit = modelContextLimit(p.Model)
-		}
-		if p.APIType == "openai" {
-			return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
-		}
-		return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
-	}
-
-	return a.provider, a.model, "legacy-boot", modelContextLimit(a.model)
+	// 2. 使用初始化时的 provider (stateful)
+	// 不再重新查询 cfg.DefaultProvider()，避免因配置导致的随机切换
+	return a.provider, a.model, a.providerID, modelContextLimit(a.model)
 }
 
 // HandleMessage 处理传入的消息并返回代理的响应。
