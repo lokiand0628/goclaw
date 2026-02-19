@@ -23,6 +23,7 @@ type ExecContext struct {
 	WorkspaceRoot string // 代理工作区的绝对路径
 	ProjectRoot   string // clawdbot 源代码的绝对路径 (用于自我修改检测)
 	SessionID     string
+	AgentID       string // 调用工具的代理 ID
 	// CompactFunc 允许工具触发当前会话的上下文压缩（由 agent 层注入）
 	CompactFunc func(ctx context.Context, sessionID string) error
 }

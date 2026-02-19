@@ -39,19 +39,13 @@ type RuntimeConfig struct {
 func (l *Loader) SystemPrompt(rc RuntimeConfig, isMainSession bool, extraContext string) (string, error) {
 	var parts []string
 
-	// 1. 注入运行时状态 (Runtime Status)
-	// 这是一个外部无法篡改的“上帝视角”信息，帮助 AI 明确自身当前的模型、时间和身份。
-	status := fmt.Sprintf("## Runtime Status\n\n"+
-		"- Current Time: %s\n"+
-		"- Agent ID: %s\n"+
-		"- Current Model: %s\n"+
-		"- Context Limit: %d tokens",
-		rc.CurrentTime.Format("2006-01-02 15:04:05 Monday"),
-		rc.AgentID,
-		rc.Model,
-		rc.ContextLimit,
-	)
-	parts = append(parts, status)
+	// 1. 系统指令 (System Commands) - 物理隔离与权限认知
+	// AI 可通过工具管理代理，但由于代码级的“安全锁”，AI 已不再具备直接修改模型调用的工具。
+	commands := "## System Commands\n" +
+		"- 我可执行: 通过内置工具管理代理、处理工作区文件。\n" +
+		"- 我不可执行（必须引导用户输入）: `/model` (切换模型/供应商), `/clear` (重置会话)。\n" +
+		"**提示**: 如遇无法确定的环境状态，请引导用户输入 `/status` 查看。"
+	parts = append(parts, commands)
 
 	// Load in the order specified by AGENTS.md
 	for _, name := range []string{"IDENTITY.md", "SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"} {

@@ -141,10 +141,10 @@ func (a *Agent) setSessionSummary(sessionID, summary string) {
 
 // resolveProvider 返回当前应使用的 AI Provider、模型名、以及该模型的上下文 token 限制。
 // 优先使用当前 session 覆盖的 provider，否则使用默认 provider。
-func (a *Agent) resolveProvider(ctx context.Context) (ai.Provider, string, int) {
+// resolveProvider 返回当前应使用的 AI Provider、模型名、ProviderID 以及上下文限制。
+func (a *Agent) resolveProvider(ctx context.Context) (ai.Provider, string, string, int) {
 	if a.cfg == nil {
-		log.Printf("[%s] resolveProvider: cfg 为 nil，使用初始配置", a.name)
-		return a.provider, a.model, modelContextLimit(a.model)
+		return a.provider, a.model, "internal-fallback", modelContextLimit(a.model)
 	}
 
 	// 1. 检查当前 session 是否有覆盖的 provider（从数据库读取）
@@ -152,34 +152,31 @@ func (a *Agent) resolveProvider(ctx context.Context) (ai.Provider, string, int) 
 	if setting != nil {
 		log.Printf("[%s] resolveProvider: 从数据库获取到 setting, providerID=%s, model=%s", a.name, setting.ProviderID, setting.Model)
 		if p, ok := a.cfg.GetProvider(setting.ProviderID); ok {
-			log.Printf("[%s] resolveProvider: 从 cfg 获取到 provider=%s, apiType=%s, baseURL=%s", a.name, p.Name, p.APIType, p.BaseURL)
 			ctxLimit := p.MaxContext
 			if ctxLimit <= 0 {
 				ctxLimit = modelContextLimit(p.Model)
 			}
 			if p.APIType == "openai" {
-				return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, ctxLimit
+				return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
 			}
-			return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, ctxLimit
+			return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
 		}
 		log.Printf("[%s] resolveProvider: 未从 cfg 获取到 provider=%s", a.name, setting.ProviderID)
 	}
 
 	// 2. 使用默认 provider
 	if p, ok := a.cfg.DefaultProvider(); ok {
-		log.Printf("[%s] resolveProvider: 使用默认 provider=%s, apiType=%s, baseURL=%s", a.name, p.Name, p.APIType, p.BaseURL)
 		ctxLimit := p.MaxContext
 		if ctxLimit <= 0 {
 			ctxLimit = modelContextLimit(p.Model)
 		}
 		if p.APIType == "openai" {
-			return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, ctxLimit
+			return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
 		}
-		return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, ctxLimit
+		return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
 	}
 
-	log.Printf("[%s] resolveProvider: 未找到任何 provider，使用初始配置", a.name)
-	return a.provider, a.model, modelContextLimit(a.model)
+	return a.provider, a.model, "legacy-boot", modelContextLimit(a.model)
 }
 
 // HandleMessage 处理传入的消息并返回代理的响应。
@@ -279,14 +276,14 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 	// 3. 上下文压缩与加载（token 估算驱动 + 模型上下文能力自适应）
 	if a.contextWindow > 0 {
 		storedMsgs, _ = a.store.GetMessages(ctx, sessionID)
-		_, _, currentCtxLimit := a.resolveProvider(ctx)
+		_, _, _, currentCtxLimit := a.resolveProvider(ctx)
 		compressThresholdTokens := int(float64(currentCtxLimit) * 0.90)
 		estimatedToks := estimateTokens(storedMsgs)
 		if estimatedToks > compressThresholdTokens || len(storedMsgs) > int(float64(a.contextWindow)*1.2) {
 			splitIdx := safeCompressSplitIndex(storedMsgs)
 			if splitIdx > 0 {
-				_, currentModel, _ := a.resolveProvider(ctx)
-				p, _, _ := a.resolveProvider(ctx)
+				_, currentModel, _, _ := a.resolveProvider(ctx)
+				p, _, _, _ := a.resolveProvider(ctx)
 				if err := a.compressHistory(ctx, sessionID, storedMsgs[:splitIdx], p, currentModel); err != nil {
 					log.Printf("代理 %s: 压缩历史失败: %v", a.id, err)
 				}
@@ -305,6 +302,7 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 		WorkspaceRoot: a.loader.Root(),
 		ProjectRoot:   a.projectRoot,
 		SessionID:     sessionID,
+		AgentID:       a.id,
 		CompactFunc:   a.CompactContext,
 	}
 
@@ -320,7 +318,7 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 
 	for iter := 0; iter < maxIterations; iter++ {
 		// 每次迭代都重新解析提供商和提示词，实现对 switch_model 等工具的实时感知
-		currentProvider, currentModel, currentCtxLimit := a.resolveProvider(ctx)
+		p, currentModel, _, currentCtxLimit := a.resolveProvider(ctx)
 
 		// 刷新系统提示词（含 Runtime Status 注入）
 		sessionSummary := a.getSessionSummary(sessionID)
@@ -341,7 +339,7 @@ func (a *Agent) HandleMessage(ctx context.Context, sessionID, userMessage string
 			Tools:    toolDefs,
 		}
 
-		ch, err := currentProvider.Stream(ctx, req)
+		ch, err := p.Stream(ctx, req)
 		if err != nil {
 			return "", fmt.Errorf("流式调用失败: %w", err)
 		}
@@ -545,7 +543,7 @@ func (a *Agent) compressHistory(ctx context.Context, sessionID string, toCompres
 // CompactContext 是 compressHistory 的公开入口，供 compact_context 工具调用。
 // 它在当前时刻（AI 主动调用时，一定处于安全的工具链边界）执行完整的历史压缩。
 func (a *Agent) CompactContext(ctx context.Context, sessionID string) error {
-	currentProvider, currentModel, _ := a.resolveProvider(ctx)
+	p, currentModel, _, _ := a.resolveProvider(ctx)
 	storedMsgs, err := a.store.GetMessages(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("获取消息失败: %w", err)
@@ -558,7 +556,7 @@ func (a *Agent) CompactContext(ctx context.Context, sessionID string) error {
 	if splitIdx <= 0 {
 		return fmt.Errorf("当前消息不足，无需压缩")
 	}
-	return a.compressHistory(ctx, sessionID, storedMsgs[:splitIdx], currentProvider, currentModel)
+	return a.compressHistory(ctx, sessionID, storedMsgs[:splitIdx], p, currentModel)
 }
 
 // HandleMessageAsync 在 goroutine 中运行 HandleMessage 并返回一个渠道。
@@ -957,19 +955,13 @@ func (a *Agent) handleSystemCommand(ctx context.Context, sessionID, msg string) 
 		a.setSessionSummary(sessionID, "")
 		return "🧹 上下文已清空，历史摘要已重置。对话已重置。", true
 
+	case "/status":
+		return GetStatusSummary(a, ctx, sessionID), true
+
 	case "/model":
 		if len(fields) == 1 {
-			// /model —— 查看当前配置
-			_, currentModel, ctxLimit := a.resolveProvider(ctx)
-			summary := a.getSessionSummary(sessionID)
-			summaryStatus := "无"
-			if summary != "" {
-				summaryStatus = fmt.Sprintf("有（%d 字节）", len(summary))
-			}
-			return fmt.Sprintf(
-				"🤖 当前配置\n代理: %s\n模型: %s\n上下文限制: ~%dk tokens\n历史摘要: %s",
-				a.name, currentModel, ctxLimit/1000, summaryStatus,
-			), true
+			_, currentModel, _, _ := a.resolveProvider(ctx)
+			return fmt.Sprintf("🤖 当前使用的模型为: **%s**。您可以使用 `/status` 查看完整配置，或使用 `/model <provider>` 切换。", currentModel), true
 		}
 		// /model <provider> [model_override] —— 切换供应商
 		providerName := fields[1]
@@ -1004,7 +996,7 @@ func (a *Agent) handleSystemCommand(ctx context.Context, sessionID, msg string) 
 		if len(providers) == 0 {
 			return "📭 暂无已配置的供应商。\n请修改 .env 文件添加 PROVIDER_XXX_API_KEY 后重启。", true
 		}
-		_, currentModel, _ := a.resolveProvider(ctx)
+		_, currentModel, _, _ := a.resolveProvider(ctx)
 		var sb strings.Builder
 		defaultProvider, _ := a.cfg.DefaultProvider()
 		sb.WriteString("📋 已配置的模型供应商：\n\n")
@@ -1027,14 +1019,13 @@ func (a *Agent) handleSystemCommand(ctx context.Context, sessionID, msg string) 
 		return sb.String(), true
 
 	case "/help":
-		return "🛠️ **系统指令**\n\n" +
-			"`/clear` — 清空当前会话历史和摘要（API 报错自救）\n" +
-			"`/model` — 查看当前模型及上下文状态\n" +
-			"`/model <provider>` — 切换到指定供应商（如 `/model minimax`）\n" +
-			"`/model <provider> <model>` — 切换并指定具体模型名\n" +
-			"`/providers` — 列出所有已配置的供应商及其上下文能力\n" +
-			"`/help` — 显示本帮助\n\n" +
-			"通过对话，AI 可使用 `add_provider` 工具自动添加新供应商配置。", true
+		return "🛠️ **系统指令帮助**\n\n" +
+			"🔸 `/status` — 查看机器人身份、模型、供应商及健康度汇总\n" +
+			"🔸 `/providers` — 列出所有已配置的供应商及其能力\n" +
+			"🔸 `/model <p>` — 切换供应商（示例：`/model minimax`）\n" +
+			"🔸 `/clear` — 清空当前会话历史和摘要（API 报错自救）\n" +
+			"🔸 `/help` — 显示本帮助\n\n" +
+			"⚠️ **注意**: 机器人（AI）本身仅具备这些指令的查询建议权，不具备自动执行权限。所有指令必须由用户手动输入执行。", true
 	}
 	return "", false
 }
