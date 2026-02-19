@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 )
 
@@ -47,30 +46,3 @@ func truncateStr(s string, n int) string {
 }
 
 // MultiAgentGetter 适配 tools.AgentGetter 接口，支持多代理查找。
-type MultiAgentGetter struct {
-	Manager *Manager
-}
-
-// GetStatus 实现 tools.AgentGetter 接口
-func (m *MultiAgentGetter) GetStatus(ctx context.Context, agentID, sessionID string) string {
-	log.Printf("[MultiAgentGetter] GetStatus request for agentID=%q sessionID=%q", agentID, sessionID)
-
-	// 尝试通过 ID 获取代理
-	a, ok := m.Manager.Get(agentID)
-	if !ok {
-		// 如果未找到（例如 "main" agent ID 可能不匹配），尝试作为备用或直接返回错误
-		// 这里假设如果没传 agentID 或者找不到，可能是通过 main 调用的旧逻辑，
-		// 但更安全的是报错或尝试找 "main"。
-		if agentID == "" {
-			a, ok = m.Manager.Get("main")
-		}
-	}
-
-	if !ok || a == nil {
-		return fmt.Sprintf("无法获取系统状态：未找到 ID 为 %q 的代理实例", agentID)
-	}
-
-	// [DEBUG] Log success
-	// log.Printf("[MultiAgentGetter] Found agent %q (id=%s), returning status summary", a.name, a.id)
-	return GetStatusSummary(a, ctx, sessionID)
-}
