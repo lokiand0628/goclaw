@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  goclaw:
+    build: .
+    image: goclaw:latest
+    container_name: goclaw
+    restart: unless-stopped
+    # Privileged mode for NAS environments that require it (as requested)
+    privileged: true
+    # Run as root user (default in Docker, but explicit for clarity)
+    user: "root"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # Mount .env for configuration
+      - ./.env:/app/.env
+      # Mount workspace for agent memory/artifacts (persistence)
+      - ./workspace:/app/workspace
+      # Mount database for persistence
+      - ./clawdbot.db:/app/clawdbot.db
+    # Network mode host is often easier for NAS to access local services, 
+    # but bridge is standard. Use bridge unless host is specifically needed.
+    network_mode: bridge
