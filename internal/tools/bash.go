@@ -48,6 +48,35 @@ type bashInput struct {
 	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
+type limitWriter struct {
+	buf       bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (w *limitWriter) Write(p []byte) (int, error) {
+	if w.remaining <= 0 {
+		w.truncated = true
+		return len(p), nil
+	}
+	if len(p) > w.remaining {
+		w.buf.Write(p[:w.remaining])
+		w.remaining = 0
+		w.truncated = true
+		return len(p), nil
+	}
+	n, _ := w.buf.Write(p)
+	w.remaining -= n
+	return len(p), nil
+}
+
+func (w *limitWriter) String() string {
+	if w.truncated {
+		return w.buf.String() + "\n... [输出已截断]"
+	}
+	return w.buf.String()
+}
+
 func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, error) {
 	var in bashInput
 	if err := json.Unmarshal(input, &in); err != nil {
@@ -76,19 +105,28 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 		"WORKSPACE="+ctx.WorkspaceRoot,
 	)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	const maxOutput = 50_000
+	stdout := &limitWriter{remaining: maxOutput}
+	stderr := &limitWriter{remaining: maxOutput}
+
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 
 	var result strings.Builder
-	if stdout.Len() > 0 {
-		result.WriteString(stdout.String())
+	outStr := stdout.String()
+	if len(outStr) > 0 {
+		result.WriteString(outStr)
 	}
-	if stderr.Len() > 0 {
-		result.WriteString("\n[stderr]\n")
-		result.WriteString(stderr.String())
+
+	errStr := stderr.String()
+	if len(errStr) > 0 {
+		if result.Len() > 0 {
+			result.WriteString("\n")
+		}
+		result.WriteString("[stderr]\n")
+		result.WriteString(errStr)
 	}
 
 	if err != nil {
@@ -99,14 +137,7 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 		return result.String(), fmt.Errorf("退出状态: %w", err)
 	}
 
-	output := result.String()
-	// 截断过长的输出以防止上下文溢出
-	const maxOutput = 50_000
-	if len(output) > maxOutput {
-		output = output[:maxOutput] + "\n... [输出已截断]"
-	}
-
-	return output, nil
+	return result.String(), nil
 }
 
 // checkCommandSafety 分析命令是否尝试写入受保护的路径。

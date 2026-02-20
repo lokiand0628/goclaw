@@ -600,7 +600,11 @@ func (a *Agent) executeTools(calls []toolCall, ctx *tools.ExecContext) []ai.Cont
 			} else {
 				result, err := tool.Execute(tc.input, ctx)
 				if err != nil {
-					output = fmt.Sprintf("错误: %s", err.Error())
+					if result != "" {
+						output = fmt.Sprintf("执行错误: %s\n\n部分输出如下:\n%s", err.Error(), result)
+					} else {
+						output = fmt.Sprintf("错误: %s", err.Error())
+					}
 					log.Printf("工具 %s 错误: %v", tc.name, err)
 				} else {
 					output = result

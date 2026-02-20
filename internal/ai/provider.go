@@ -501,21 +501,99 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 	// 转换消息
 	var messages []map[string]interface{}
 	for _, m := range req.Messages {
-		var content strings.Builder
-		for _, c := range m.Content {
-			switch c.Type {
-			case "text":
-				content.WriteString(c.Text)
-			case "tool_result":
-				// OpenAI 的 tool_result 必须作为单独的 role=tool 消息
-				// 这是一个简化处理，假设一次只有一条 result。
-				// TODO: 实现更完整的工具结果转换逻辑
-				content.WriteString(fmt.Sprintf("[Tool Result: %s]", *c.Content))
+		if m.Role == "user" || m.Role == "system" {
+			var content strings.Builder
+			var toolResults []map[string]interface{}
+			for _, c := range m.Content {
+				switch c.Type {
+				case "text":
+					content.WriteString(c.Text)
+				case "tool_result":
+					// OpenAI 的 tool_result 必须作为单独的 role="tool" 消息发送
+					res := ""
+					if c.Content != nil {
+						res = *c.Content
+					}
+					if res == "" {
+						res = "Success"
+					}
+					toolResults = append(toolResults, map[string]interface{}{
+						"role":         "tool",
+						"tool_call_id": c.ToolUseID,
+						"content":      res,
+					})
+				}
 			}
+
+			// 如果这个 user 消息包含由 text 构建的部分，添加 user 消息
+			if content.Len() > 0 {
+				messages = append(messages, map[string]interface{}{
+					"role":    m.Role,
+					"content": content.String(),
+				})
+			} else if len(toolResults) == 0 {
+				// 避免空 content
+				messages = append(messages, map[string]interface{}{
+					"role":    m.Role,
+					"content": " ",
+				})
+			}
+
+			// 追加 tool_results 作为独立的消息
+			for _, tr := range toolResults {
+				messages = append(messages, tr)
+			}
+		} else if m.Role == "assistant" {
+			var content strings.Builder
+			var toolCalls []map[string]interface{}
+			for _, c := range m.Content {
+				switch c.Type {
+				case "text", "thinking":
+					// 文本或思考内容直接加进去
+					if c.Text != "" {
+						content.WriteString(c.Text)
+					}
+					if c.Thinking != "" {
+						content.WriteString("\n<thought>\n" + c.Thinking + "\n</thought>\n")
+					}
+				case "tool_use":
+					// 构建 openai 格式的 tool_call
+					toolCalls = append(toolCalls, map[string]interface{}{
+						"id":   c.ID,
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      c.Name,
+							"arguments": string(c.Input),
+						},
+					})
+				}
+			}
+
+			msg := map[string]interface{}{
+				"role": "assistant",
+			}
+			if content.Len() > 0 {
+				msg["content"] = content.String()
+			}
+			if len(toolCalls) > 0 {
+				msg["tool_calls"] = toolCalls
+			}
+			messages = append(messages, msg)
 		}
-		messages = append(messages, map[string]interface{}{
-			"role":    m.Role,
-			"content": content.String(),
+	}
+
+	// 转换工具定义
+	var openAITools []map[string]interface{}
+	for _, t := range req.Tools {
+		var schema map[string]interface{}
+		_ = json.Unmarshal(t.InputSchema, &schema)
+		openAITools = append(openAITools, map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        t.Name,
+				"description": t.Description,
+				"parameters":  schema,
+			},
 		})
 	}
 
@@ -523,6 +601,10 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 		"model":    req.Model,
 		"messages": messages,
 		"stream":   true,
+	}
+
+	if len(openAITools) > 0 {
+		payload["tools"] = openAITools
 	}
 
 	body, _ := json.Marshal(payload)
@@ -556,6 +638,14 @@ func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
 	defer body.Close()
 	defer close(ch)
 
+	// 用于追踪多部分流式返回的 tool_calls
+	type partialTool struct {
+		id    string
+		name  string
+		input strings.Builder
+	}
+	tools := make(map[int]*partialTool)
+
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -563,8 +653,16 @@ func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
-		// fmt.Printf("DEBUG: OpenAI SSE Data: %s\n", data) // 临时调试
 		if data == "[DONE]" {
+			// 在结束前将所有未完成的 tool call 发送出去
+			for _, t := range tools {
+				ch <- Event{
+					Type:      EventToolUse,
+					ToolUseID: t.id,
+					ToolName:  t.name,
+					ToolInput: json.RawMessage(t.input.String()),
+				}
+			}
 			ch <- Event{Type: EventDone}
 			return
 		}
@@ -572,7 +670,16 @@ func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
 		var payload struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
@@ -583,10 +690,42 @@ func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
 
 		if len(payload.Choices) > 0 {
 			choice := payload.Choices[0]
+
+			// 1. 处理普通文本
 			if choice.Delta.Content != "" {
 				ch <- Event{Type: EventText, Text: choice.Delta.Content}
 			}
+
+			// 2. 处理工具调用
+			for _, tc := range choice.Delta.ToolCalls {
+				t, exists := tools[tc.Index]
+				if !exists {
+					t = &partialTool{
+						id:   tc.ID,
+						name: tc.Function.Name,
+					}
+					tools[tc.Index] = t
+				}
+				if tc.Function.Arguments != "" {
+					t.input.WriteString(tc.Function.Arguments)
+				}
+			}
+
+			// 3. 停止原因或完成
 			if choice.FinishReason != "" {
+				// 如果是因为工具调用而停止，在此刻将拼接好的工具调用发送出去
+				if choice.FinishReason == "tool_calls" {
+					// 先发 tool_use，再发 stop_reason
+					for idx, t := range tools {
+						ch <- Event{
+							Type:      EventToolUse,
+							ToolUseID: t.id,
+							ToolName:  t.name,
+							ToolInput: json.RawMessage(t.input.String()),
+						}
+						delete(tools, idx)
+					}
+				}
 				ch <- Event{Type: EventStopReason, StopReason: choice.FinishReason}
 			}
 		}
