@@ -49,6 +49,15 @@ var defaultModelConfig = ModelConfig{
 	ContextWindow: 128000,
 }
 
+const maxSSELineBytes = 2 * 1024 * 1024
+
+func newSSEScanner(r io.Reader) *bufio.Scanner {
+	s := bufio.NewScanner(r)
+	// 默认 Scanner token 上限仅 64KB，较大的 SSE data 行会报错并中断工具调用链路。
+	s.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
+	return s
+}
+
 // modelRegistry 存储已知模型的配置
 // 参考 OpenClaw 的配置方式
 var modelRegistry = map[string]ModelConfig{
@@ -243,6 +252,58 @@ func NewAnthropicProvider(apiKey, baseURL, model string, opts *ProviderOptions) 
 	return p
 }
 
+// OpenAIProvider 使用 OpenAI Chat Completions API 实现 Provider。
+type OpenAIProvider struct {
+	apiKey  string
+	baseURL string
+	model   string
+	client  *http.Client
+	options ProviderOptions
+}
+
+func NewOpenAIProvider(apiKey, baseURL, model string, opts *ProviderOptions) *OpenAIProvider {
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	// 自动回退查找环境变量
+	finalKey := resolveEnvKey(apiKey, "OPENAI_API_KEY")
+	p := &OpenAIProvider{
+		apiKey:  finalKey,
+		baseURL: normalizeOpenAIBaseURL(baseURL),
+		model:   model,
+		client:  &http.Client{Timeout: 300 * time.Second},
+	}
+	if opts != nil {
+		p.options = *opts
+	}
+	return p
+}
+
+func normalizeOpenAIBaseURL(baseURL string) string {
+	u := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	lower := strings.ToLower(u)
+
+	// DashScope 原生多模态端点是完整路径，不能被裁剪。
+	if strings.Contains(lower, "/multimodal-generation/generation") {
+		return u
+	}
+
+	if strings.HasSuffix(lower, "/chat/completions") {
+		return u[:len(u)-len("/chat/completions")]
+	}
+	if strings.HasSuffix(lower, "/v1/messages") {
+		return u[:len(u)-len("/messages")]
+	}
+	if strings.HasSuffix(lower, "/messages") {
+		return u[:len(u)-len("/messages")]
+	}
+	return u
+}
+
+func isDashScopeMultimodalGenerationURL(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "/multimodal-generation/generation")
+}
+
 func truncateDebug(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -362,7 +423,7 @@ func (p *AnthropicProvider) parseSSE(ctx context.Context, body io.ReadCloser, ch
 	}
 	tools := make(map[int]*partialTool)
 
-	scanner := bufio.NewScanner(body)
+	scanner := newSSEScanner(body)
 	var eventType string
 
 	for scanner.Scan() {
@@ -374,14 +435,14 @@ func (p *AnthropicProvider) parseSSE(ctx context.Context, body io.ReadCloser, ch
 		}
 
 		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		// fmt.Printf("DEBUG: Anthropic SSE Data: %s\n", data) // 临时调试
 		if data == "[DONE]" {
 			ch <- Event{Type: EventDone}
@@ -466,152 +527,47 @@ func (p *AnthropicProvider) parseSSE(ctx context.Context, body io.ReadCloser, ch
 	}
 }
 
-// OpenAIProvider 使用 OpenAI Chat Completions API 实现 Provider
-// (支持任何兼容 OpenAI 协议的提供商，如 DeepSeek, GPT-4, etc)。
-type OpenAIProvider struct {
-	apiKey  string
-	baseURL string
-	model   string
-	client  *http.Client
-	options ProviderOptions
-}
-
-func NewOpenAIProvider(apiKey, baseURL, model string, opts *ProviderOptions) *OpenAIProvider {
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
-	}
-	finalKey := resolveEnvKey(apiKey, "OPENAI_API_KEY")
-	p := &OpenAIProvider{
-		apiKey:  finalKey,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		client:  &http.Client{Timeout: 300 * time.Second},
-	}
-	if opts != nil {
-		p.options = *opts
-	}
-	return p
-}
-
 func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event, error) {
+	if isDashScopeMultimodalGenerationURL(p.baseURL) {
+		return p.streamDashScopeMultimodalGeneration(ctx, req)
+	}
+
+	// 优先使用 options 中的 MaxTokens
+	if p.options.MaxTokens > 0 {
+		req.MaxTokens = p.options.MaxTokens
+	}
+	if req.MaxTokens == 0 {
+		req.MaxTokens = modelMaxTokens(req.Model)
+	}
 	if req.Model == "" {
 		req.Model = p.model
 	}
 
-	// 转换消息
-	var messages []map[string]interface{}
-	for _, m := range req.Messages {
-		if m.Role == "user" || m.Role == "system" {
-			var content strings.Builder
-			var toolResults []map[string]interface{}
-			for _, c := range m.Content {
-				switch c.Type {
-				case "text":
-					content.WriteString(c.Text)
-				case "tool_result":
-					// OpenAI 的 tool_result 必须作为单独的 role="tool" 消息发送
-					res := ""
-					if c.Content != nil {
-						res = *c.Content
-					}
-					if res == "" {
-						res = "Success"
-					}
-					toolResults = append(toolResults, map[string]interface{}{
-						"role":         "tool",
-						"tool_call_id": c.ToolUseID,
-						"content":      res,
-					})
-				}
-			}
-
-			// 如果这个 user 消息包含由 text 构建的部分，添加 user 消息
-			if content.Len() > 0 {
-				messages = append(messages, map[string]interface{}{
-					"role":    m.Role,
-					"content": content.String(),
-				})
-			} else if len(toolResults) == 0 {
-				// 避免空 content
-				messages = append(messages, map[string]interface{}{
-					"role":    m.Role,
-					"content": " ",
-				})
-			}
-
-			// 追加 tool_results 作为独立的消息
-			for _, tr := range toolResults {
-				messages = append(messages, tr)
-			}
-		} else if m.Role == "assistant" {
-			var content strings.Builder
-			var toolCalls []map[string]interface{}
-			for _, c := range m.Content {
-				switch c.Type {
-				case "text", "thinking":
-					// 文本或思考内容直接加进去
-					if c.Text != "" {
-						content.WriteString(c.Text)
-					}
-					if c.Thinking != "" {
-						content.WriteString("\n<thought>\n" + c.Thinking + "\n</thought>\n")
-					}
-				case "tool_use":
-					// 构建 openai 格式的 tool_call
-					toolCalls = append(toolCalls, map[string]interface{}{
-						"id":   c.ID,
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      c.Name,
-							"arguments": string(c.Input),
-						},
-					})
-				}
-			}
-
-			msg := map[string]interface{}{
-				"role": "assistant",
-			}
-			if content.Len() > 0 {
-				msg["content"] = content.String()
-			}
-			if len(toolCalls) > 0 {
-				msg["tool_calls"] = toolCalls
-			}
-			messages = append(messages, msg)
-		}
+	type openAIRequest struct {
+		Model    string    `json:"model"`
+		Messages []Message `json:"messages"`
+		Tools    []ToolDef `json:"tools,omitempty"`
+		Stream   bool      `json:"stream"`
 	}
 
-	// 转换工具定义
-	var openAITools []map[string]interface{}
-	for _, t := range req.Tools {
-		var schema map[string]interface{}
-		_ = json.Unmarshal(t.InputSchema, &schema)
-		openAITools = append(openAITools, map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        t.Name,
-				"description": t.Description,
-				"parameters":  schema,
-			},
-		})
+	reqBody := openAIRequest{
+		Model:    req.Model,
+		Messages: req.Messages,
+		Tools:    req.Tools,
+		Stream:   true,
 	}
 
-	payload := map[string]interface{}{
-		"model":    req.Model,
-		"messages": messages,
-		"stream":   true,
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	if len(openAITools) > 0 {
-		payload["tools"] = openAITools
+	fullURL := p.baseURL
+	if !strings.Contains(fullURL, "/chat/completions") {
+		fullURL = strings.TrimRight(fullURL, "/") + "/chat/completions"
 	}
 
-	body, _ := json.Marshal(payload)
-	// fmt.Printf("📤 API 请求 (OpenAI): model=%s, messages=%d, payload=%d bytes, key=%s\n",
-	// 	req.Model, len(req.Messages), len(body), maskKey(p.apiKey))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		p.baseURL+"/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -620,25 +576,152 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("OpenAI API 错误 %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(body))
 	}
 
 	ch := make(chan Event, 64)
-	go p.parseSSE(resp.Body, ch)
+	go p.parseSSE(ctx, resp.Body, ch)
 	return ch, nil
 }
 
-func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
+func (p *OpenAIProvider) streamDashScopeMultimodalGeneration(ctx context.Context, req *Request) (<-chan Event, error) {
+	if req.Model == "" {
+		req.Model = p.model
+	}
+
+	type dsContent struct {
+		Text string `json:"text,omitempty"`
+	}
+	type dsMessage struct {
+		Role    string      `json:"role"`
+		Content []dsContent `json:"content"`
+	}
+	type dsRequest struct {
+		Model string `json:"model"`
+		Input struct {
+			Messages []dsMessage `json:"messages"`
+		} `json:"input"`
+		Parameters struct {
+			ResultFormat string `json:"result_format"`
+		} `json:"parameters"`
+	}
+	type dsResponse struct {
+		Output struct {
+			Choices []struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		} `json:"output"`
+	}
+
+	var bodyReq dsRequest
+	bodyReq.Model = req.Model
+	bodyReq.Parameters.ResultFormat = "message"
+
+	for _, m := range req.Messages {
+		var msg dsMessage
+		msg.Role = m.Role
+
+		for _, c := range m.Content {
+			switch c.Type {
+			case "text":
+				if c.Text != "" {
+					msg.Content = append(msg.Content, dsContent{Text: c.Text})
+				}
+			case "tool_result":
+				if c.Content != nil && *c.Content != "" {
+					msg.Content = append(msg.Content, dsContent{Text: *c.Content})
+				}
+			}
+		}
+
+		if len(msg.Content) == 0 {
+			continue
+		}
+		bodyReq.Input.Messages = append(bodyReq.Input.Messages, msg)
+	}
+
+	body, err := json.Marshal(bodyReq)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	var parsed dsResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	ch := make(chan Event, 4)
+	go func() {
+		defer close(ch)
+
+		for _, choice := range parsed.Output.Choices {
+			for _, part := range choice.Message.Content {
+				if part.Text != "" {
+					ch <- Event{Type: EventText, Text: part.Text}
+				}
+			}
+		}
+		ch <- Event{Type: EventDone}
+	}()
+
+	return ch, nil
+}
+
+func (p *OpenAIProvider) parseSSE(ctx context.Context, body io.ReadCloser, ch chan<- Event) {
 	defer body.Close()
 	defer close(ch)
 
-	// 用于追踪多部分流式返回的 tool_calls
+	type openAIChunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+
 	type partialTool struct {
 		id    string
 		name  string
@@ -646,88 +729,60 @@ func (p *OpenAIProvider) parseSSE(body io.ReadCloser, ch chan<- Event) {
 	}
 	tools := make(map[int]*partialTool)
 
-	scanner := bufio.NewScanner(body)
+	scanner := newSSEScanner(body)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			// 在结束前将所有未完成的 tool call 发送出去
-			for _, t := range tools {
+			break
+		}
+
+		var chunk openAIChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		delta := chunk.Choices[0].Delta
+		if delta.Content != "" {
+			ch <- Event{Type: EventText, Text: delta.Content}
+		}
+
+		for _, tc := range delta.ToolCalls {
+			t, ok := tools[tc.Index]
+			if !ok {
+				t = &partialTool{id: tc.ID, name: tc.Function.Name}
+				tools[tc.Index] = t
+			}
+			if tc.Function.Arguments != "" {
+				t.input.WriteString(tc.Function.Arguments)
+			}
+		}
+
+		if chunk.Choices[0].FinishReason != "" {
+			// 如果有未发出的工具调用，在此发出
+			for idx, t := range tools {
 				ch <- Event{
 					Type:      EventToolUse,
 					ToolUseID: t.id,
 					ToolName:  t.name,
 					ToolInput: json.RawMessage(t.input.String()),
 				}
+				delete(tools, idx)
 			}
-			ch <- Event{Type: EventDone}
-			return
-		}
-
-		var payload struct {
-			Choices []struct {
-				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(data), &payload); err != nil {
-			continue
-		}
-
-		if len(payload.Choices) > 0 {
-			choice := payload.Choices[0]
-
-			// 1. 处理普通文本
-			if choice.Delta.Content != "" {
-				ch <- Event{Type: EventText, Text: choice.Delta.Content}
-			}
-
-			// 2. 处理工具调用
-			for _, tc := range choice.Delta.ToolCalls {
-				t, exists := tools[tc.Index]
-				if !exists {
-					t = &partialTool{
-						id:   tc.ID,
-						name: tc.Function.Name,
-					}
-					tools[tc.Index] = t
-				}
-				if tc.Function.Arguments != "" {
-					t.input.WriteString(tc.Function.Arguments)
-				}
-			}
-
-			// 3. 停止原因或完成
-			if choice.FinishReason != "" {
-				// 如果是因为工具调用而停止，在此刻将拼接好的工具调用发送出去
-				if choice.FinishReason == "tool_calls" {
-					// 先发 tool_use，再发 stop_reason
-					for idx, t := range tools {
-						ch <- Event{
-							Type:      EventToolUse,
-							ToolUseID: t.id,
-							ToolName:  t.name,
-							ToolInput: json.RawMessage(t.input.String()),
-						}
-						delete(tools, idx)
-					}
-				}
-				ch <- Event{Type: EventStopReason, StopReason: choice.FinishReason}
-			}
+			ch <- Event{Type: EventStopReason, StopReason: chunk.Choices[0].FinishReason}
 		}
 	}
+
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		ch <- Event{Type: EventError, Err: err}
+	}
 }
+
+// resolveEnvKey 尝试从环境变量获取 Key，如果传入的 apiKey 看起来像环境变量名

@@ -350,10 +350,7 @@ func (c *Config) parseProvidersFromEnv() {
 			}
 		}
 
-		// 默认值
-		if p.APIType == "" {
-			p.APIType = "anthropic" // 默认协议
-		}
+		normalizeProvider(p)
 
 		// 只保存有 APIKey 的 provider
 		if p.APIKey != "" {
@@ -380,7 +377,7 @@ func (c *Config) parseLegacyProviders() {
 		{"BAILIAN", "bailian", "https://coding.dashscope.aliyuncs.com/apps/anthropic", "qwen-max", "anthropic"},
 		{"KIMI", "kimi", "", "k2p5", "anthropic"},
 		{"ANTHROPIC", "anthropic", "", "claude-3-5-sonnet-latest", "anthropic"},
-		{"OPENAI", "openai", "", "gpt-4o", "openai"},
+		{"OPENAI", "openai", "https://api.openai.com/v1", "gpt-4o", "openai"},
 	}
 
 	for _, prov := range providers {
@@ -407,6 +404,45 @@ func (c *Config) parseLegacyProviders() {
 			APIType:    prov.apiType,
 			MaxContext: 0,
 		}
+		normalizeProvider(c.providers[prov.name])
+	}
+}
+
+func normalizeProvider(p *Provider) {
+	p.APIType = strings.ToLower(strings.TrimSpace(p.APIType))
+	p.BaseURL = strings.TrimSpace(p.BaseURL)
+
+	// 兼容常见的配置错误：
+	// DashScope 的 compatible-mode 是 OpenAI 协议，若误配为 anthropic，自动修正。
+	if p.APIType == "anthropic" && strings.Contains(strings.ToLower(p.BaseURL), "compatible-mode") {
+		p.APIType = "openai"
+	}
+
+	if p.APIType == "" {
+		p.APIType = inferAPIType(p.Name, p.BaseURL)
+	}
+}
+
+func inferAPIType(name, baseURL string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	b := strings.ToLower(strings.TrimSpace(baseURL))
+
+	switch {
+	case strings.Contains(b, "compatible-mode"):
+		return "openai"
+	case strings.Contains(b, "/multimodal-generation/generation"):
+		return "openai"
+	case strings.Contains(b, "/chat/completions"):
+		return "openai"
+	case strings.Contains(b, "/anthropic"):
+		return "anthropic"
+	}
+
+	switch n {
+	case "openai", "qwen", "deepseek":
+		return "openai"
+	default:
+		return "anthropic"
 	}
 }
 
