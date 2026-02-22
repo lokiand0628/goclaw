@@ -171,6 +171,35 @@ type ToolDef struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
+type openAIFunctionDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type openAIToolDef struct {
+	Type     string            `json:"type"`
+	Function openAIFunctionDef `json:"function"`
+}
+
+type openAIFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type openAIToolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type"`
+	Function openAIFunctionCall `json:"function"`
+}
+
+type openAIChatMessage struct {
+	Role       string           `json:"role"`
+	Content    any              `json:"content,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
 // EventType 标识流式事件的类型。
 type EventType string
 
@@ -317,6 +346,199 @@ func truncateDebug(s string, n int) string {
 	return string(runes[:n]) + "…"
 }
 
+func sanitizeJSONSchema(schema json.RawMessage) json.RawMessage {
+	defaultSchema := json.RawMessage(`{"type":"object","properties":{}}`)
+	if len(bytes.TrimSpace(schema)) == 0 {
+		return defaultSchema
+	}
+	var decoded any
+	if err := json.Unmarshal(schema, &decoded); err != nil {
+		return defaultSchema
+	}
+	if _, ok := decoded.(map[string]any); !ok {
+		return defaultSchema
+	}
+	return schema
+}
+
+func sanitizeAnthropicTools(defs []ToolDef) []ToolDef {
+	result := make([]ToolDef, 0, len(defs))
+	for _, d := range defs {
+		name := strings.TrimSpace(d.Name)
+		if name == "" {
+			continue
+		}
+		result = append(result, ToolDef{
+			Name:        name,
+			Description: strings.TrimSpace(d.Description),
+			InputSchema: sanitizeJSONSchema(d.InputSchema),
+		})
+	}
+	return result
+}
+
+func sanitizeAnthropicMessages(msgs []Message) []Message {
+	result := make([]Message, 0, len(msgs))
+	for _, msg := range msgs {
+		clean := make([]Content, 0, len(msg.Content))
+		for _, c := range msg.Content {
+			switch c.Type {
+			case "text":
+				if c.Text == "" {
+					continue
+				}
+				clean = append(clean, Content{
+					Type: "text",
+					Text: c.Text,
+				})
+			case "tool_use":
+				if strings.TrimSpace(c.Name) == "" {
+					continue
+				}
+				input := c.Input
+				if len(bytes.TrimSpace(input)) == 0 {
+					input = json.RawMessage(`{}`)
+				}
+				clean = append(clean, Content{
+					Type:  "tool_use",
+					ID:    c.ID,
+					Name:  c.Name,
+					Input: input,
+				})
+			case "tool_result":
+				if strings.TrimSpace(c.ToolUseID) == "" {
+					continue
+				}
+				text := ""
+				if c.Content != nil {
+					text = *c.Content
+				}
+				clean = append(clean, Content{
+					Type:      "tool_result",
+					ToolUseID: c.ToolUseID,
+					Content:   &text,
+					IsError:   c.IsError,
+				})
+			case "thinking":
+				// 将思考块写回上下文会导致部分 Anthropic 兼容提供商（如 Bailian）400。
+				continue
+			}
+		}
+		if len(clean) == 0 {
+			continue
+		}
+		msg.Content = clean
+		result = append(result, msg)
+	}
+	return result
+}
+
+func convertToolsToOpenAI(defs []ToolDef) []openAIToolDef {
+	result := make([]openAIToolDef, 0, len(defs))
+	for _, d := range defs {
+		name := strings.TrimSpace(d.Name)
+		if name == "" {
+			continue
+		}
+		result = append(result, openAIToolDef{
+			Type: "function",
+			Function: openAIFunctionDef{
+				Name:        name,
+				Description: strings.TrimSpace(d.Description),
+				Parameters:  sanitizeJSONSchema(d.InputSchema),
+			},
+		})
+	}
+	return result
+}
+
+func textFromBlocks(contents []Content) string {
+	var parts []string
+	for _, c := range contents {
+		if c.Type == "text" && c.Text != "" {
+			parts = append(parts, c.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func convertMessagesToOpenAI(msgs []Message) []openAIChatMessage {
+	result := make([]openAIChatMessage, 0, len(msgs))
+	seenToolCalls := make(map[string]bool)
+
+	for _, msg := range msgs {
+		text := textFromBlocks(msg.Content)
+
+		switch msg.Role {
+		case "system", "user":
+			if text != "" {
+				result = append(result, openAIChatMessage{
+					Role:    msg.Role,
+					Content: text,
+				})
+			}
+			if msg.Role == "user" {
+				for _, c := range msg.Content {
+					if c.Type != "tool_result" || strings.TrimSpace(c.ToolUseID) == "" {
+						continue
+					}
+					if !seenToolCalls[c.ToolUseID] {
+						continue
+					}
+					content := ""
+					if c.Content != nil {
+						content = *c.Content
+					}
+					result = append(result, openAIChatMessage{
+						Role:       "tool",
+						ToolCallID: c.ToolUseID,
+						Content:    content,
+					})
+				}
+			}
+		case "assistant":
+			calls := make([]openAIToolCall, 0, len(msg.Content))
+			for _, c := range msg.Content {
+				if c.Type != "tool_use" || strings.TrimSpace(c.Name) == "" {
+					continue
+				}
+				callID := strings.TrimSpace(c.ID)
+				if callID == "" {
+					continue
+				}
+				args := strings.TrimSpace(string(c.Input))
+				if args == "" {
+					args = "{}"
+				}
+				seenToolCalls[callID] = true
+				calls = append(calls, openAIToolCall{
+					ID:   callID,
+					Type: "function",
+					Function: openAIFunctionCall{
+						Name:      c.Name,
+						Arguments: args,
+					},
+				})
+			}
+			if text == "" && len(calls) == 0 {
+				continue
+			}
+			m := openAIChatMessage{
+				Role:      "assistant",
+				ToolCalls: calls,
+			}
+			if text != "" {
+				m.Content = text
+			} else if len(calls) > 0 {
+				m.Content = ""
+			}
+			result = append(result, m)
+		}
+	}
+
+	return result
+}
+
 func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Event, error) {
 	startAt := time.Now()
 	// 优先使用 options 中的 MaxTokens
@@ -348,8 +570,8 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Ev
 	reqBody := anthropicRequest{
 		Model:     req.Model,
 		System:    req.System,
-		Messages:  req.Messages,
-		Tools:     req.Tools,
+		Messages:  sanitizeAnthropicMessages(req.Messages),
+		Tools:     sanitizeAnthropicTools(req.Tools),
 		MaxTokens: req.MaxTokens,
 		Stream:    true,
 	}
@@ -566,16 +788,16 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 	}
 
 	type openAIRequest struct {
-		Model    string    `json:"model"`
-		Messages []Message `json:"messages"`
-		Tools    []ToolDef `json:"tools,omitempty"`
-		Stream   bool      `json:"stream"`
+		Model    string              `json:"model"`
+		Messages []openAIChatMessage `json:"messages"`
+		Tools    []openAIToolDef     `json:"tools,omitempty"`
+		Stream   bool                `json:"stream"`
 	}
 
 	reqBody := openAIRequest{
 		Model:    req.Model,
-		Messages: req.Messages,
-		Tools:    req.Tools,
+		Messages: convertMessagesToOpenAI(req.Messages),
+		Tools:    convertToolsToOpenAI(req.Tools),
 		Stream:   true,
 	}
 

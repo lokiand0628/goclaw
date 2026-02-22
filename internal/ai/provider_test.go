@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -101,3 +102,105 @@ func TestOpenAIParseSSEAcceptsNoSpacePrefix(t *testing.T) {
 	}
 }
 
+func TestConvertToolsToOpenAI(t *testing.T) {
+	tools := []ToolDef{
+		{
+			Name:        "bash",
+			Description: "run shell command",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`),
+		},
+		{
+			Name:        "bad",
+			Description: "bad schema fallback",
+			InputSchema: json.RawMessage(`"not-an-object"`),
+		},
+	}
+
+	converted := convertToolsToOpenAI(tools)
+	if len(converted) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(converted))
+	}
+	if converted[0].Type != "function" {
+		t.Fatalf("expected tool type=function, got %q", converted[0].Type)
+	}
+	if converted[0].Function.Name != "bash" {
+		t.Fatalf("expected tool name bash, got %q", converted[0].Function.Name)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(converted[1].Function.Parameters, &schema); err != nil {
+		t.Fatalf("fallback schema should be valid JSON object, got err: %v", err)
+	}
+	if got, ok := schema["type"].(string); !ok || got != "object" {
+		t.Fatalf("expected fallback type=object, got %#v", schema["type"])
+	}
+}
+
+func TestConvertMessagesToOpenAI(t *testing.T) {
+	toolResult := "ok"
+	msgs := []Message{
+		{
+			Role: "user",
+			Content: []Content{
+				{Type: "text", Text: "hello"},
+			},
+		},
+		{
+			Role: "assistant",
+			Content: []Content{
+				{Type: "thinking", Thinking: "hidden"},
+				{Type: "text", Text: "running tool"},
+				{Type: "tool_use", ID: "call_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+			},
+		},
+		{
+			Role: "user",
+			Content: []Content{
+				{Type: "tool_result", ToolUseID: "call_1", Content: &toolResult},
+			},
+		},
+	}
+
+	got := convertMessagesToOpenAI(msgs)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got))
+	}
+	if got[0].Role != "user" || got[0].Content != "hello" {
+		t.Fatalf("unexpected first message: %+v", got[0])
+	}
+	if got[1].Role != "assistant" {
+		t.Fatalf("expected assistant message, got %+v", got[1])
+	}
+	if len(got[1].ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %+v", got[1].ToolCalls)
+	}
+	if got[1].ToolCalls[0].Function.Arguments != `{"command":"ls"}` {
+		t.Fatalf("unexpected tool arguments: %q", got[1].ToolCalls[0].Function.Arguments)
+	}
+	if got[2].Role != "tool" || got[2].ToolCallID != "call_1" || got[2].Content != "ok" {
+		t.Fatalf("unexpected tool result message: %+v", got[2])
+	}
+}
+
+func TestSanitizeAnthropicMessagesDropsThinking(t *testing.T) {
+	msgs := []Message{
+		{
+			Role: "assistant",
+			Content: []Content{
+				{Type: "thinking", Thinking: "internal"},
+				{Type: "text", Text: "visible"},
+			},
+		},
+	}
+
+	got := sanitizeAnthropicMessages(msgs)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(got))
+	}
+	if len(got[0].Content) != 1 {
+		t.Fatalf("expected thinking block removed, got %+v", got[0].Content)
+	}
+	if got[0].Content[0].Type != "text" || got[0].Content[0].Text != "visible" {
+		t.Fatalf("unexpected sanitized content: %+v", got[0].Content[0])
+	}
+}
