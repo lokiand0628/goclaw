@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/robfig/cron/v3"
 
+	"goclaw/internal/logx"
 	"goclaw/internal/store"
 )
 
@@ -42,13 +42,23 @@ func NewCronScheduler(st store.Store, workspace string, handler CronHandler) *Cr
 }
 
 func (cs *CronScheduler) Start(ctx context.Context) error {
-	jobs, err := cs.loadJobs()
+	jobs, err := cs.store.ListAllCronJobs(ctx)
 	if err != nil {
-		log.Printf("[cron] 加载任务失败 (可能尚未迁移或不存在): %v", err)
-		// 如果加载失败，尝试从数据库获取（作为备份/兼容）
-		dbJobs, dbErr := cs.store.ListAllCronJobs(ctx)
-		if dbErr == nil && len(dbJobs) > 0 {
-			jobs = dbJobs
+		return fmt.Errorf("[cron] 从数据库加载任务失败: %w", err)
+	}
+
+	// 兼容旧版本：如果 DB 中没有任务，则尝试从 legacy JSON 导入一次。
+	if len(jobs) == 0 {
+		legacyJobs, legacyErr := cs.loadJobs()
+		if legacyErr == nil && len(legacyJobs) > 0 {
+			for _, j := range legacyJobs {
+				if err := cs.store.SaveCronJob(ctx, j); err != nil {
+					log.Printf("[cron] 导入 legacy 任务 %s 失败: %v", j.ID, err)
+					continue
+				}
+			}
+			jobs, _ = cs.store.ListAllCronJobs(ctx)
+			log.Printf("[cron] 已从 legacy JSON 导入 %d 个任务到数据库", len(jobs))
 		}
 	}
 
@@ -104,6 +114,7 @@ func (cs *CronScheduler) addJob(ctx context.Context, job *store.CronJob) error {
 	jobCopy := *job // 避免闭包捕获可变变量
 	entryID, err := cs.cr.AddFunc(job.CronExpr, func() {
 		log.Printf("[cron] 触发任务: %s (%s)", jobCopy.ID, jobCopy.Name)
+		logx.Info("cron_job_triggered", "job_id", jobCopy.ID, "agent_id", jobCopy.AgentID)
 		cs.handler(ctx, jobCopy.AgentID, &jobCopy)
 	})
 	if err != nil {
@@ -129,53 +140,20 @@ func (cs *CronScheduler) loadJobs() ([]*store.CronJob, error) {
 	return jobs, nil
 }
 
-func (cs *CronScheduler) saveJobs(jobs []*store.CronJob) error {
-	data, err := json.MarshalIndent(jobs, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(cs.cronPath, data, 0644)
-}
-
 func (cs *CronScheduler) SaveJob(job *store.CronJob) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-
-	jobs, _ := cs.loadJobs()
-	found := false
-	for i, j := range jobs {
-		if j.ID == job.ID {
-			job.UpdatedAt = time.Now()
-			jobs[i] = job
-			found = true
-			break
-		}
-	}
-	if !found {
-		job.CreatedAt = time.Now()
-		job.UpdatedAt = time.Now()
-		jobs = append(jobs, job)
-	}
-
-	return cs.saveJobs(jobs)
+	return cs.store.SaveCronJob(context.Background(), job)
 }
 
 func (cs *CronScheduler) DeleteJob(id string) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-
-	jobs, _ := cs.loadJobs()
-	var nextJobs []*store.CronJob
-	for _, j := range jobs {
-		if j.ID != id {
-			nextJobs = append(nextJobs, j)
-		}
-	}
-	return cs.saveJobs(nextJobs)
+	return cs.store.DeleteCronJob(context.Background(), id)
 }
 
 func (cs *CronScheduler) ListJobs() ([]*store.CronJob, error) {
-	return cs.loadJobs()
+	return cs.store.ListAllCronJobs(context.Background())
 }
 
 // ListEntries 返回当前所有已注册任务的调度状态（用于调试/工具显示）。

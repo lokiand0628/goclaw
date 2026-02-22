@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"goclaw/internal/logx"
 )
 
 // Provider 定义了 LLM 接口。
@@ -316,6 +318,7 @@ func truncateDebug(s string, n int) string {
 }
 
 func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Event, error) {
+	startAt := time.Now()
 	// 优先使用 options 中的 MaxTokens
 	if p.options.MaxTokens > 0 {
 		req.MaxTokens = p.options.MaxTokens
@@ -378,14 +381,32 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Ev
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		logx.Error("provider_request_failed",
+			"provider_type", "anthropic",
+			"model", req.Model,
+			"base_url", p.baseURL,
+			"error", err.Error(),
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		logx.Warn("provider_bad_status",
+			"provider_type", "anthropic",
+			"model", req.Model,
+			"status_code", resp.StatusCode,
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(body))
 	}
+	logx.Info("provider_stream_opened",
+		"provider_type", "anthropic",
+		"model", req.Model,
+		"latency_ms", time.Since(startAt).Milliseconds(),
+	)
 
 	ch := make(chan Event, 64)
 	go p.parseSSE(ctx, resp.Body, ch)
@@ -528,6 +549,7 @@ func (p *AnthropicProvider) parseSSE(ctx context.Context, body io.ReadCloser, ch
 }
 
 func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event, error) {
+	startAt := time.Now()
 	if isDashScopeMultimodalGenerationURL(p.baseURL) {
 		return p.streamDashScopeMultimodalGeneration(ctx, req)
 	}
@@ -576,14 +598,32 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		logx.Error("provider_request_failed",
+			"provider_type", "openai",
+			"model", req.Model,
+			"base_url", p.baseURL,
+			"error", err.Error(),
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		logx.Warn("provider_bad_status",
+			"provider_type", "openai",
+			"model", req.Model,
+			"status_code", resp.StatusCode,
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(body))
 	}
+	logx.Info("provider_stream_opened",
+		"provider_type", "openai",
+		"model", req.Model,
+		"latency_ms", time.Since(startAt).Milliseconds(),
+	)
 
 	ch := make(chan Event, 64)
 	go p.parseSSE(ctx, resp.Body, ch)
@@ -591,6 +631,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 }
 
 func (p *OpenAIProvider) streamDashScopeMultimodalGeneration(ctx context.Context, req *Request) (<-chan Event, error) {
+	startAt := time.Now()
 	if req.Model == "" {
 		req.Model = p.model
 	}
@@ -664,12 +705,25 @@ func (p *OpenAIProvider) streamDashScopeMultimodalGeneration(ctx context.Context
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		logx.Error("provider_request_failed",
+			"provider_type", "openai_dashscope_mm",
+			"model", req.Model,
+			"base_url", p.baseURL,
+			"error", err.Error(),
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("HTTP 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		logx.Warn("provider_bad_status",
+			"provider_type", "openai_dashscope_mm",
+			"model", req.Model,
+			"status_code", resp.StatusCode,
+			"latency_ms", time.Since(startAt).Milliseconds(),
+		)
 		return nil, fmt.Errorf("API 错误 %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -696,6 +750,11 @@ func (p *OpenAIProvider) streamDashScopeMultimodalGeneration(ctx context.Context
 		}
 		ch <- Event{Type: EventDone}
 	}()
+	logx.Info("provider_request_done",
+		"provider_type", "openai_dashscope_mm",
+		"model", req.Model,
+		"latency_ms", time.Since(startAt).Milliseconds(),
+	)
 
 	return ch, nil
 }

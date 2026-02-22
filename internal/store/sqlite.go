@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -92,7 +94,8 @@ type CronJob struct {
 }
 
 type SQLiteStore struct {
-	db *sql.DB
+	db      *sql.DB
+	writeMu sync.Mutex
 }
 
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
@@ -102,9 +105,25 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开 sqlite 失败: %w", err)
 	}
-	// 设置单个写入者以避免 WAL 争用
-	db.SetMaxOpenConns(1)
+	// WAL 下允许并发读；写入在 Store 层串行化，减少 SQLITE_BUSY。
+	maxOpen := runtime.NumCPU()
+	if maxOpen < 4 {
+		maxOpen = 4
+	}
+	if maxOpen > 16 {
+		maxOpen = 16
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxOpen / 2)
+	db.SetConnMaxLifetime(30 * time.Minute)
+
 	return &SQLiteStore{db: db}, nil
+}
+
+func (s *SQLiteStore) withWriteLock(fn func() error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return fn()
 }
 
 func (s *SQLiteStore) Init(ctx context.Context) error {
@@ -167,12 +186,14 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 }
 
 func (s *SQLiteStore) SetAgentModel(ctx context.Context, agentID, model, providerID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO agent_settings(agent_id, model, provider_id, updated_at)
-		 VALUES(?,?,?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(agent_id) DO UPDATE SET model=excluded.model, provider_id=excluded.provider_id, updated_at=CURRENT_TIMESTAMP`,
-		agentID, model, providerID)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO agent_settings(agent_id, model, provider_id, updated_at)
+			 VALUES(?,?,?, CURRENT_TIMESTAMP)
+			 ON CONFLICT(agent_id) DO UPDATE SET model=excluded.model, provider_id=excluded.provider_id, updated_at=CURRENT_TIMESTAMP`,
+			agentID, model, providerID)
+		return err
+	})
 }
 
 func (s *SQLiteStore) GetAgentSetting(ctx context.Context, agentID string) (*AgentSetting, error) {
@@ -192,9 +213,11 @@ func (s *SQLiteStore) Close() error {
 }
 
 func (s *SQLiteStore) GetOrCreateSession(ctx context.Context, id string) (*Session, error) {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO sessions(id) VALUES(?)`, id)
-	if err != nil {
+	if err := s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO sessions(id) VALUES(?)`, id)
+		return err
+	}); err != nil {
 		return nil, fmt.Errorf("插入或忽略会话失败: %w", err)
 	}
 	return s.fetchSession(ctx, id)
@@ -214,27 +237,35 @@ func (s *SQLiteStore) fetchSession(ctx context.Context, id string) (*Session, er
 }
 
 func (s *SQLiteStore) LockSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET locked=1, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE sessions SET locked=1, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+		return err
+	})
 }
 
 func (s *SQLiteStore) UnlockSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET locked=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE sessions SET locked=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+		return err
+	})
 }
 
 // UnlockStaleSessions 解锁被残留的锁定会话（例如在进程崩溃后）。
 func (s *SQLiteStore) UnlockStaleSessions(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET locked=0 WHERE locked=1`)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE sessions SET locked=0 WHERE locked=1`)
+		return err
+	})
 }
 
 func (s *SQLiteStore) DeleteSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id=?`, id)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id=?`, id)
+		return err
+	})
 }
 
 func (s *SQLiteStore) ListSessions(ctx context.Context) ([]*Session, error) {
@@ -263,10 +294,12 @@ func (s *SQLiteStore) AddMessage(ctx context.Context, sessionID, role, content s
 }
 
 func (s *SQLiteStore) AddComplexMessage(ctx context.Context, sessionID, role, content, msgType string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages(session_id, role, content, type) VALUES(?,?,?,?)`,
-		sessionID, role, content, msgType)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO messages(session_id, role, content, type) VALUES(?,?,?,?)`,
+			sessionID, role, content, msgType)
+		return err
+	})
 }
 
 func (s *SQLiteStore) GetMessages(ctx context.Context, sessionID string) ([]*Message, error) {
@@ -291,26 +324,32 @@ func (s *SQLiteStore) GetMessages(ctx context.Context, sessionID string) ([]*Mes
 
 // PruneLastMessage 移除会话中的最后一条消息（用于卡死循环的自我修复）。
 func (s *SQLiteStore) PruneLastMessage(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM messages WHERE id = (
-			SELECT id FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1
-		)`, sessionID)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, `
+			DELETE FROM messages WHERE id = (
+				SELECT id FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1
+			)`, sessionID)
+		return err
+	})
 }
 
 // TruncateMessages 在会话中仅保留最后 `keep` 条消息。
 func (s *SQLiteStore) TruncateMessages(ctx context.Context, sessionID string, keep int) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM messages WHERE session_id=? AND id NOT IN (
-			SELECT id FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?
-		)`, sessionID, sessionID, keep)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, `
+			DELETE FROM messages WHERE session_id=? AND id NOT IN (
+				SELECT id FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?
+			)`, sessionID, sessionID, keep)
+		return err
+	})
 }
 
 // DeleteAllMessages 物理删除会话的所有消息。
 func (s *SQLiteStore) DeleteAllMessages(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE session_id=?`, sessionID)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE session_id=?`, sessionID)
+		return err
+	})
 }
 
 // DeleteMessagesByIDs 根据 ID 列表删除消息（用于清理孤立工具消息）
@@ -326,17 +365,21 @@ func (s *SQLiteStore) DeleteMessagesByIDs(ctx context.Context, ids []int64) erro
 		args[i] = id
 	}
 	query := fmt.Sprintf(`DELETE FROM messages WHERE id IN (%s)`, strings.Join(placeholders, ","))
-	_, err := s.db.ExecContext(ctx, query, args...)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, query, args...)
+		return err
+	})
 }
 
 func (s *SQLiteStore) CreateAgent(ctx context.Context, id, name, workspace, channels, model, providerID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO agents(id, name, workspace, channels, model, provider_id, updated_at)
-		 VALUES(?,?,?,?,?,?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, workspace=excluded.workspace, channels=excluded.channels, model=excluded.model, provider_id=excluded.provider_id, updated_at=CURRENT_TIMESTAMP`,
-		id, name, workspace, channels, model, providerID)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO agents(id, name, workspace, channels, model, provider_id, updated_at)
+			 VALUES(?,?,?,?,?,?, CURRENT_TIMESTAMP)
+			 ON CONFLICT(id) DO UPDATE SET name=excluded.name, workspace=excluded.workspace, channels=excluded.channels, model=excluded.model, provider_id=excluded.provider_id, updated_at=CURRENT_TIMESTAMP`,
+			id, name, workspace, channels, model, providerID)
+		return err
+	})
 }
 
 func (s *SQLiteStore) ListDataAgents(ctx context.Context) ([]*AgentBaseInfo, error) {
@@ -359,24 +402,28 @@ func (s *SQLiteStore) ListDataAgents(ctx context.Context) ([]*AgentBaseInfo, err
 // --- Cron 定时任务 ---
 
 func (s *SQLiteStore) SaveCronJob(ctx context.Context, job *CronJob) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO cron_jobs(id, agent_id, name, cron_expr, prompt, channel_id, enabled, updated_at)
-		 VALUES(?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(id) DO UPDATE SET
-		   agent_id=excluded.agent_id,
-		   name=excluded.name,
-		   cron_expr=excluded.cron_expr,
-		   prompt=excluded.prompt,
-		   channel_id=excluded.channel_id,
-		   enabled=excluded.enabled,
-		   updated_at=CURRENT_TIMESTAMP`,
-		job.ID, job.AgentID, job.Name, job.CronExpr, job.Prompt, job.ChannelID, boolToInt(job.Enabled))
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO cron_jobs(id, agent_id, name, cron_expr, prompt, channel_id, enabled, updated_at)
+			 VALUES(?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+			 ON CONFLICT(id) DO UPDATE SET
+			   agent_id=excluded.agent_id,
+			   name=excluded.name,
+			   cron_expr=excluded.cron_expr,
+			   prompt=excluded.prompt,
+			   channel_id=excluded.channel_id,
+			   enabled=excluded.enabled,
+			   updated_at=CURRENT_TIMESTAMP`,
+			job.ID, job.AgentID, job.Name, job.CronExpr, job.Prompt, job.ChannelID, boolToInt(job.Enabled))
+		return err
+	})
 }
 
 func (s *SQLiteStore) DeleteCronJob(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id=?`, id)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id=?`, id)
+		return err
+	})
 }
 
 func (s *SQLiteStore) ListCronJobs(ctx context.Context, agentID string) ([]*CronJob, error) {
@@ -400,10 +447,12 @@ func (s *SQLiteStore) ListAllCronJobs(ctx context.Context) ([]*CronJob, error) {
 }
 
 func (s *SQLiteStore) SetCronJobEnabled(ctx context.Context, id string, enabled bool) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE cron_jobs SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		boolToInt(enabled), id)
-	return err
+	return s.withWriteLock(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE cron_jobs SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			boolToInt(enabled), id)
+		return err
+	})
 }
 
 func scanCronJobs(rows *sql.Rows) ([]*CronJob, error) {

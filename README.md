@@ -38,11 +38,13 @@
 
 当前版本已实现「单二进制部署 + 多渠道接入 + 多 Provider 兼容 + 工具调用 + 本地持久化」的主线能力，适合个人与小团队生产使用。
 
-仍在持续优化的方向：
-*   **可靠性**：持续补齐 Provider 兼容回归测试（SSE 事件格式、URL 归一化、协议推断）。
-*   **可观测性**：增强结构化日志与故障定位信息。
-*   **架构解耦**：进一步拆分启动编排，降低维护复杂度。
-*   **并发吞吐**：在保持 SQLite 可靠性的前提下优化读写路径。
+本轮已完成的 P0-P2 优化：
+*   **P0 可靠性**：补齐 Provider 回归测试（SSE 事件格式、URL 归一化、协议推断）。
+*   **P1 存储一致性**：Cron 调度统一以数据库为单一事实源，保留一次性 legacy JSON 导入。
+*   **P1 并发吞吐**：SQLite 升级为连接池读并发 + 写串行锁，降低争用。
+*   **P1 配置治理**：Provider 解析统一到 `providers` 运行态，兼容 `PROVIDER_*`、legacy ENV、JSON 配置。
+*   **P2 可观测性**：新增轻量结构化日志组件（JSON 行日志）用于 Provider/Cron/Bash 关键路径。
+*   **P2 安全围栏**：Bash 命令守护升级为“写操作 + 受保护路径”联合检测，降低绕过风险。
 
 ## 🛠️ 快速上手
 
@@ -87,6 +89,12 @@ make check
 *   **Bailian (Qwen)**：`BASE_URL=https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages` + `TYPE=anthropic`
 
 如果你误填了常见 URL（例如把 OpenAI 兼容地址写成 `.../messages`），系统会做基础归一化处理，但仍建议按 `.env.example` 保持标准写法。
+
+## 🧪 回归覆盖
+
+当前已覆盖的关键回归点：
+*   `internal/ai/provider_test.go`：SSE 解析兼容（`data:` / `event:` 有无空格）、OpenAI BaseURL 归一化。
+*   `internal/config/config_test.go`：协议推断、`compatible-mode` 自动修正、legacy OpenAI 兼容解析。
 
 ---
 *Powered by Golang & OpenClaw Architecture*

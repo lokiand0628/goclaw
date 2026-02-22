@@ -185,48 +185,6 @@ func overlayEnv(cfg *Config) {
 		}
 	}
 
-	// 从环境变量加载 LLM 提供商
-	if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
-		ensureProvider(cfg, "minimax", ProviderConfig{
-			BaseURL: envOr("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"),
-			APIKey:  key,
-			Model:   envOr("MINIMAX_MODEL", "MiniMax-M2.5"),
-			API:     "anthropic",
-		})
-	}
-	if key := os.Getenv("BAILIAN_API_KEY"); key != "" {
-		ensureProvider(cfg, "bailian", ProviderConfig{
-			BaseURL: envOr("BAILIAN_BASE_URL", "https://coding.dashscope.aliyuncs.com/apps/anthropic"),
-			APIKey:  key,
-			Model:   envOr("BAILIAN_MODEL", "qwen3-max-2026-01-23"),
-			API:     "anthropic",
-		})
-	}
-	if key := os.Getenv("KIMI_API_KEY"); key != "" {
-		ensureProvider(cfg, "kimi", ProviderConfig{
-			BaseURL: os.Getenv("KIMI_BASE_URL"),
-			APIKey:  key,
-			Model:   envOr("KIMI_MODEL", "k2p5"),
-			API:     "anthropic",
-		})
-	}
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		ensureProvider(cfg, "anthropic", ProviderConfig{
-			BaseURL: os.Getenv("ANTHROPIC_BASE_URL"),
-			APIKey:  key,
-			Model:   envOr("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
-			API:     "anthropic",
-		})
-	}
-	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		ensureProvider(cfg, "openai", ProviderConfig{
-			BaseURL: os.Getenv("OPENAI_BASE_URL"),
-			APIKey:  key,
-			Model:   envOr("OPENAI_MODEL", "gpt-4o"),
-			API:     "openai",
-		})
-	}
-
 	// 从环境变量加载渠道凭据 (覆盖 JSON)
 	if v := os.Getenv("FEISHU_APP_ID"); v != "" {
 		cfg.Channels.Feishu.AppID = v
@@ -362,6 +320,10 @@ func (c *Config) parseProvidersFromEnv() {
 	if len(c.providers) == 0 {
 		c.parseLegacyProviders()
 	}
+	// 最后回退：JSON 中的 models.providers（旧配置文件）
+	if len(c.providers) == 0 {
+		c.parseProvidersFromJSON()
+	}
 }
 
 // parseLegacyProviders 解析旧的 ENV 格式（向后兼容）
@@ -405,6 +367,29 @@ func (c *Config) parseLegacyProviders() {
 			MaxContext: 0,
 		}
 		normalizeProvider(c.providers[prov.name])
+	}
+}
+
+func (c *Config) parseProvidersFromJSON() {
+	if c.Models.Providers == nil {
+		return
+	}
+	for name, p := range c.Models.Providers {
+		if strings.TrimSpace(p.APIKey) == "" {
+			continue
+		}
+		prov := &Provider{
+			Name:       strings.ToLower(strings.TrimSpace(name)),
+			BaseURL:    strings.TrimSpace(p.BaseURL),
+			APIKey:     strings.TrimSpace(p.APIKey),
+			Model:      strings.TrimSpace(p.Model),
+			APIType:    strings.TrimSpace(p.API),
+			MaxContext: 0,
+		}
+		normalizeProvider(prov)
+		if prov.Name != "" {
+			c.providers[prov.Name] = prov
+		}
 	}
 }
 
@@ -518,15 +503,6 @@ func (c *Config) AgentByID(id string) (AgentConfig, bool) {
 		}
 	}
 	return AgentConfig{}, false
-}
-
-func ensureProvider(cfg *Config, name string, p ProviderConfig) {
-	if cfg.Models.Providers == nil {
-		cfg.Models.Providers = make(map[string]ProviderConfig)
-	}
-	if existing, ok := cfg.Models.Providers[name]; !ok || existing.APIKey == "" {
-		cfg.Models.Providers[name] = p
-	}
 }
 
 func envOr(key, def string) string {

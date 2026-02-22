@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"goclaw/internal/logx"
 )
 
 // BashTool 执行 shell 命令。
@@ -99,6 +103,7 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 
 	// 守护：检测对受保护路径的写入
 	if err := b.checkCommandSafety(in.Command); err != nil {
+		logx.Warn("bash_command_blocked", "agent_id", ctx.AgentID, "session_id", ctx.SessionID, "error", err.Error())
 		return "", err
 	}
 
@@ -145,11 +150,14 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {
+			logx.Warn("bash_command_timeout", "agent_id", ctx.AgentID, "session_id", ctx.SessionID, "timeout_sec", int(timeout.Seconds()))
 			return result.String(), fmt.Errorf("命令在 %s 后超时", timeout)
 		}
 		// 即使退出状态码非零也返回输出，以便 AI 查看错误原因
+		logx.Warn("bash_command_failed", "agent_id", ctx.AgentID, "session_id", ctx.SessionID, "error", err.Error())
 		return result.String(), fmt.Errorf("退出状态: %w", err)
 	}
+	logx.Info("bash_command_succeeded", "agent_id", ctx.AgentID, "session_id", ctx.SessionID)
 
 	return result.String(), nil
 }
@@ -157,28 +165,46 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 // checkCommandSafety 分析命令是否尝试写入受保护的路径。
 // 这是一种尽力而为的启发式检查；真正的守护是 Docker 中的 OS 权限。
 func (b *BashTool) checkCommandSafety(command string) error {
-	// 涉及受保护文件的危险模式列表
-	writePatterns := []string{
-		"> .env", ">> .env",
-		" .env ", "/.env",
-		"go.mod", "go.sum",
-		"docker-compose",
-		"Dockerfile",
-	}
+	normalized := strings.ToLower(strings.TrimSpace(command))
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
 
-	for _, p := range writePatterns {
-		if strings.Contains(command, p) {
-			// 仅当看起来像写入操作时才进行拦截
-			writeOps := []string{">", "tee ", "sed -i", "echo ", "cat >", "printf "}
-			for _, op := range writeOps {
-				if strings.Contains(command, op) {
-					return fmt.Errorf("🔴 已拦截: 命令似乎在修改受保护文件 (%q)。请使用用户批准的方法处理凭据", p)
-				}
-			}
+	// 仅在检测到“写操作”特征时，才继续检查目标文件。
+	writeOps := []string{
+		">", ">>", "1>", "2>", "| tee", "tee ", "sed -i", "perl -i",
+		"cp ", "mv ", "rm ", "truncate ", "install ", "touch ",
+	}
+	hasWriteOp := false
+	for _, op := range writeOps {
+		if strings.Contains(normalized, op) {
+			hasWriteOp = true
+			break
 		}
 	}
+	if !hasWriteOp {
+		return nil
+	}
 
+	protectedTargets := []string{
+		".env",
+		"go.mod",
+		"go.sum",
+		"dockerfile",
+		"docker-compose.yml",
+		"docker-compose.yaml",
+	}
+	for _, target := range protectedTargets {
+		if mentionsProtectedPath(normalized, target) {
+			return fmt.Errorf("🔴 已拦截: 命令似乎在修改受保护文件 (%q)。请改用受控方式处理", target)
+		}
+	}
 	return nil
+}
+
+func mentionsProtectedPath(command, target string) bool {
+	escaped := regexp.QuoteMeta(strings.ToLower(filepath.ToSlash(target)))
+	pattern := `(^|[\s'"/])` + escaped + `($|[\s'"])`
+	re := regexp.MustCompile(pattern)
+	return re.FindStringIndex(command) != nil
 }
 
 // WriteFileTool 允许代理在强制执行守护规则的情况下写入文件。
