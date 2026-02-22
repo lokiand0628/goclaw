@@ -1,4 +1,4 @@
-.PHONY: build run dev tidy clean
+.PHONY: build run dev tidy clean check
 
 # 编译
 build:
@@ -25,6 +25,10 @@ checkpoints:
 
 tidy:
 	go mod tidy
+
+check:
+	go test ./...
+	go vet ./...
 
 clean:
 	rm -f goclaw goclaw.backup

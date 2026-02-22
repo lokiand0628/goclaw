@@ -34,6 +34,16 @@
 *   **沙盒执行环境**: 内置的 Shell与文件操作工具均受安全策略管控，支持严格的路径白名单。
 *   **记忆持久化**: 采用 SQLite 本地数据库进行会话存储，数据完全私有化。
 
+## 🧭 设计现状与优化方向
+
+当前版本已实现「单二进制部署 + 多渠道接入 + 多 Provider 兼容 + 工具调用 + 本地持久化」的主线能力，适合个人与小团队生产使用。
+
+仍在持续优化的方向：
+*   **可靠性**：持续补齐 Provider 兼容回归测试（SSE 事件格式、URL 归一化、协议推断）。
+*   **可观测性**：增强结构化日志与故障定位信息。
+*   **架构解耦**：进一步拆分启动编排，降低维护复杂度。
+*   **并发吞吐**：在保持 SQLite 可靠性的前提下优化读写路径。
+
 ## 🛠️ 快速上手
 
 ### 1. 准备配置
@@ -58,10 +68,25 @@ go build -o clawdbot ./cmd/clawdbot/
 docker-compose up -d
 ```
 
+### 2.1 质量检查（建议）
+```bash
+make check
+```
+
 ### 3. 使用指令
 在连接的聊天窗口中（如 Telegram）：
 *   `/status` - 查看当前系统状态与模型信息
 *   `/clear` - 重置当前对话记忆
+
+## 🔌 Provider 配置建议（实践版）
+
+以下组合已在项目内进行兼容适配，推荐优先使用：
+*   **Qwen 3.5 Plus**：`BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1` + `TYPE=openai`
+*   **Kimi Coding (k2p5)**：`BASE_URL=https://api.kimi.com/coding` + `TYPE=anthropic`
+*   **MiniMax**：`BASE_URL=https://api.minimaxi.com/anthropic` + `TYPE=anthropic`
+*   **Bailian (Qwen)**：`BASE_URL=https://coding.dashscope.aliyuncs.com/apps/anthropic/v1/messages` + `TYPE=anthropic`
+
+如果你误填了常见 URL（例如把 OpenAI 兼容地址写成 `.../messages`），系统会做基础归一化处理，但仍建议按 `.env.example` 保持标准写法。
 
 ---
 *Powered by Golang & OpenClaw Architecture*
