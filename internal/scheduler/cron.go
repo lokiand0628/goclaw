@@ -2,9 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/robfig/cron/v3"
 
@@ -17,35 +21,35 @@ import (
 type CronHandler func(ctx context.Context, agentID string, job *store.CronJob)
 
 // CronScheduler 使用 robfig/cron 驱动所有 cron 定时任务。
-// 支持标准 5 字段 cron 表达式（分 时 日 月 周）以及 @every 语法。
 type CronScheduler struct {
 	cr      *cron.Cron
 	store   store.Store
 	handler CronHandler
 
-	mu      sync.Mutex
-	entries map[string]cron.EntryID // job.ID -> cron entry ID（用于动态增删）
+	mu       sync.Mutex
+	entries  map[string]cron.EntryID // job.ID -> cron entry ID
+	cronPath string                  // JSON 文件存储路径
 }
 
-// NewCronScheduler 创建并返回一个新的 CronScheduler。
-// handler 会在每次任务触发时被调用，由调用者负责实际的 AI 消息处理和渠道发送。
-func NewCronScheduler(st store.Store, handler CronHandler) *CronScheduler {
+func NewCronScheduler(st store.Store, workspace string, handler CronHandler) *CronScheduler {
 	return &CronScheduler{
-		// 使用秒级精度可选，这里用标准 5 字段（分 时 日 月 周），更接近常见 cron 用法
-		cr:      cron.New(cron.WithLogger(cron.DefaultLogger)),
-		store:   st,
-		handler: handler,
-		entries: make(map[string]cron.EntryID),
+		cr:       cron.New(cron.WithLogger(cron.DefaultLogger)),
+		store:    st,
+		handler:  handler,
+		entries:  make(map[string]cron.EntryID),
+		cronPath: filepath.Join(workspace, "cron_jobs.json"),
 	}
 }
 
-// Start 从数据库加载所有已启用的 cron 任务并启动调度器。
-// 会持续运行直到 ctx 取消。
 func (cs *CronScheduler) Start(ctx context.Context) error {
-	// 加载已有任务
-	jobs, err := cs.store.ListAllCronJobs(ctx)
+	jobs, err := cs.loadJobs()
 	if err != nil {
-		return fmt.Errorf("加载 cron 任务失败: %w", err)
+		log.Printf("[cron] 加载任务失败 (可能尚未迁移或不存在): %v", err)
+		// 如果加载失败，尝试从数据库获取（作为备份/兼容）
+		dbJobs, dbErr := cs.store.ListAllCronJobs(ctx)
+		if dbErr == nil && len(dbJobs) > 0 {
+			jobs = dbJobs
+		}
 	}
 
 	for _, job := range jobs {
@@ -111,6 +115,67 @@ func (cs *CronScheduler) addJob(ctx context.Context, job *store.CronJob) error {
 
 	log.Printf("[cron] 已注册任务: %s (%s) 表达式=%q", job.ID, job.Name, job.CronExpr)
 	return nil
+}
+
+func (cs *CronScheduler) loadJobs() ([]*store.CronJob, error) {
+	data, err := os.ReadFile(cs.cronPath)
+	if err != nil {
+		return nil, err
+	}
+	var jobs []*store.CronJob
+	if err := json.Unmarshal(data, &jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func (cs *CronScheduler) saveJobs(jobs []*store.CronJob) error {
+	data, err := json.MarshalIndent(jobs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cs.cronPath, data, 0644)
+}
+
+func (cs *CronScheduler) SaveJob(job *store.CronJob) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	jobs, _ := cs.loadJobs()
+	found := false
+	for i, j := range jobs {
+		if j.ID == job.ID {
+			job.UpdatedAt = time.Now()
+			jobs[i] = job
+			found = true
+			break
+		}
+	}
+	if !found {
+		job.CreatedAt = time.Now()
+		job.UpdatedAt = time.Now()
+		jobs = append(jobs, job)
+	}
+
+	return cs.saveJobs(jobs)
+}
+
+func (cs *CronScheduler) DeleteJob(id string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	jobs, _ := cs.loadJobs()
+	var nextJobs []*store.CronJob
+	for _, j := range jobs {
+		if j.ID != id {
+			nextJobs = append(nextJobs, j)
+		}
+	}
+	return cs.saveJobs(nextJobs)
+}
+
+func (cs *CronScheduler) ListJobs() ([]*store.CronJob, error) {
+	return cs.loadJobs()
 }
 
 // ListEntries 返回当前所有已注册任务的调度状态（用于调试/工具显示）。

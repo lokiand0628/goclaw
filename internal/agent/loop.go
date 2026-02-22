@@ -159,10 +159,14 @@ func (a *Agent) resolveProvider(ctx context.Context) (ai.Provider, string, strin
 			if ctxLimit <= 0 {
 				ctxLimit = modelContextLimit(p.Model)
 			}
+			opts := &ai.ProviderOptions{ContextWindow: ctxLimit}
+			var provider ai.Provider
 			if p.APIType == "openai" {
-				return ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
+				provider = ai.NewOpenAIProvider(p.APIKey, p.BaseURL, p.Model, opts)
+			} else {
+				provider = ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, opts)
 			}
-			return ai.NewAnthropicProvider(p.APIKey, p.BaseURL, p.Model, &ai.ProviderOptions{ContextWindow: ctxLimit}), p.Model, p.Name, ctxLimit
+			return provider, p.Model, p.Name, ctxLimit
 		}
 		log.Printf("[%s] resolveProvider: 未从 cfg 获取到 provider=%s", a.name, setting.ProviderID)
 	}
@@ -1028,7 +1032,7 @@ func (a *Agent) handleSystemCommand(ctx context.Context, sessionID, msg string) 
 			"🔸 `/model <p>` — 切换供应商（示例：`/model minimax`）\n" +
 			"🔸 `/clear` — 清空当前会话历史和摘要（API 报错自救）\n" +
 			"🔸 `/help` — 显示本帮助\n\n" +
-			"⚠️ **注意**: 机器人（AI）本身仅具备这些指令的查询建议权，不具备自动执行权限。所有指令必须由用户手动输入执行。", true
+			"⚠️ **注意**: 以上 `/...` 属于系统拦截指令，需由用户手动输入；普通任务中的工具调用（如文件/命令执行）可由机器人自动完成。", true
 	}
 	return "", false
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,6 +16,7 @@ import (
 // 它遵守文件修改的守护规则。
 type BashTool struct {
 	DefaultTimeout time.Duration
+	MaxOutputBytes int
 }
 
 func (b *BashTool) Name() string { return "bash" }
@@ -77,6 +79,18 @@ func (w *limitWriter) String() string {
 	return w.buf.String()
 }
 
+func (b *BashTool) resolveMaxOutput() int {
+	if b.MaxOutputBytes > 0 {
+		return b.MaxOutputBytes
+	}
+	if v := strings.TrimSpace(os.Getenv("CLAWDBOT_BASH_MAX_OUTPUT_BYTES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 200_000
+}
+
 func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, error) {
 	var in bashInput
 	if err := json.Unmarshal(input, &in); err != nil {
@@ -105,7 +119,7 @@ func (b *BashTool) Execute(input json.RawMessage, ctx *ExecContext) (string, err
 		"WORKSPACE="+ctx.WorkspaceRoot,
 	)
 
-	const maxOutput = 50_000
+	maxOutput := b.resolveMaxOutput()
 	stdout := &limitWriter{remaining: maxOutput}
 	stderr := &limitWriter{remaining: maxOutput}
 

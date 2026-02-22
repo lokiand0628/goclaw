@@ -14,6 +14,9 @@ import (
 type CronSchedulerIface interface {
 	AddJob(ctx context.Context, job *store.CronJob) error
 	RemoveJob(jobID string)
+	SaveJob(job *store.CronJob) error
+	DeleteJob(id string) error
+	ListJobs() ([]*store.CronJob, error)
 }
 
 // ManageCronTool 让 AI 可以管理定时任务（cron jobs）。
@@ -80,7 +83,10 @@ func (t *ManageCronTool) Execute(input json.RawMessage, ctx *ExecContext) (strin
 
 	switch in.Action {
 	case "list":
-		jobs, err := t.Store.ListAllCronJobs(bg)
+		if t.Sched == nil {
+			return "", fmt.Errorf("定时调度器未就绪")
+		}
+		jobs, err := t.Sched.ListJobs()
 		if err != nil {
 			return "", fmt.Errorf("查询任务失败: %w", err)
 		}
@@ -122,13 +128,14 @@ func (t *ManageCronTool) Execute(input json.RawMessage, ctx *ExecContext) (strin
 			ChannelID: in.ChannelID,
 			Enabled:   true,
 		}
-		if err := t.Store.SaveCronJob(bg, job); err != nil {
+		if t.Sched == nil {
+			return "", fmt.Errorf("定时调度器未就绪")
+		}
+		if err := t.Sched.SaveJob(job); err != nil {
 			return "", fmt.Errorf("保存任务失败: %w", err)
 		}
-		if t.Sched != nil {
-			if err := t.Sched.AddJob(bg, job); err != nil {
-				log.Printf("[cron] 动态添加任务失败: %v", err)
-			}
+		if err := t.Sched.AddJob(bg, job); err != nil {
+			log.Printf("[cron] 动态添加任务失败: %v", err)
 		}
 		chDesc := in.ChannelID
 		if chDesc == "" {
@@ -139,34 +146,45 @@ func (t *ManageCronTool) Execute(input json.RawMessage, ctx *ExecContext) (strin
 
 	case "delete":
 		if in.ID == "" {
-			return "", fmt.Errorf("delete 操作需要提供 id")
+			return "", fmt.Errorf("delete 操作 need providing id")
 		}
-		if err := t.Store.DeleteCronJob(bg, in.ID); err != nil {
+		if t.Sched == nil {
+			return "", fmt.Errorf("定时调度器未就绪")
+		}
+		if err := t.Sched.DeleteJob(in.ID); err != nil {
 			return "", fmt.Errorf("删除任务失败: %w", err)
 		}
-		if t.Sched != nil {
-			t.Sched.RemoveJob(in.ID)
-		}
+		t.Sched.RemoveJob(in.ID)
 		return fmt.Sprintf("🗑️ Cron 任务 **%s** 已删除。", in.ID), nil
 
 	case "enable", "disable":
 		if in.ID == "" {
-			return "", fmt.Errorf("%s 操作需要提供 id", in.Action)
+			return "", fmt.Errorf("%s 操作 need providing id", in.Action)
+		}
+		if t.Sched == nil {
+			return "", fmt.Errorf("定时调度器未就绪")
 		}
 		enabled := in.Action == "enable"
-		if err := t.Store.SetCronJobEnabled(bg, in.ID, enabled); err != nil {
+
+		jobs, _ := t.Sched.ListJobs()
+		var targetJob *store.CronJob
+		for _, j := range jobs {
+			if j.ID == in.ID {
+				j.Enabled = enabled
+				targetJob = j
+				break
+			}
+		}
+
+		if targetJob == nil {
+			return "", fmt.Errorf("未找到任务: %s", in.ID)
+		}
+
+		if err := t.Sched.SaveJob(targetJob); err != nil {
 			return "", fmt.Errorf("更新任务状态失败: %w", err)
 		}
-		if t.Sched != nil {
-			jobs, _ := t.Store.ListAllCronJobs(bg)
-			for _, j := range jobs {
-				if j.ID == in.ID {
-					if err := t.Sched.AddJob(bg, j); err != nil {
-						log.Printf("[cron] 动态更新任务失败: %v", err)
-					}
-					break
-				}
-			}
+		if err := t.Sched.AddJob(bg, targetJob); err != nil {
+			log.Printf("[cron] 动态更新任务失败: %v", err)
 		}
 		verb := "已启用"
 		if !enabled {

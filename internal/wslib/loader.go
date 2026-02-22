@@ -42,8 +42,8 @@ func (l *Loader) SystemPrompt(rc RuntimeConfig, isMainSession bool, extraContext
 	// 1. 系统指令 (System Commands) - 物理隔离与权限认知
 	// AI 可通过工具管理代理，但由于代码级的“安全锁”，AI 已不再具备直接修改模型调用的工具。
 	commands := "## System Commands\n" +
-		"- 我可执行: 通过内置工具管理代理、处理工作区文件。\n" +
-		"- 我不可执行（必须引导用户输入）: `/model` (切换模型/供应商), `/clear` (重置会话)。\n" +
+		"- 我可执行: 通过内置工具处理工作区文件、运行命令与管理任务。\n" +
+		"- 我不可直接发送（必须引导用户输入）: `/model` (切换模型/供应商), `/clear` (重置会话)。\n" +
 		"**提示**: 如遇无法确定的环境状态，请引导用户输入 `/status` 查看。"
 	parts = append(parts, commands)
 
