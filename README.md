@@ -1,6 +1,6 @@
 # goclaw (Clawdbot)
 
-`goclaw` 是基于 [OpenClaw]([https://github.com/openclaw](https://github.com/openclaw/openclaw)) 的 Go 重构版本，重点在于用更轻量、稳定、易维护的方式服务真实使用场景。
+`goclaw` 是基于 [OpenClaw]([https://github.com/openclaw/openclaw) 的 Go 重构版本，重点在于用更轻量、稳定、易维护的方式服务真实使用场景。
 
 ## 项目背景（爱好者视角）
 
