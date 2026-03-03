@@ -181,7 +181,7 @@ func TestNormalizePermissionMemberType(t *testing.T) {
 	}
 }
 
-func TestFeishuToolsSmokeWithMockServer(t *testing.T) {
+func TestFeishuToolsAllActionsWithMockServer(t *testing.T) {
 	server := newMockFeishuServer(t, nil)
 	defer server.Close()
 
@@ -199,10 +199,46 @@ func TestFeishuToolsSmokeWithMockServer(t *testing.T) {
 			contains: []string{`"chat_id": "oc_test"`, `"name": "Mock Chat"`},
 		},
 		{
+			name:     "chat members",
+			tool:     &FeishuChatTool{Cfg: cfg},
+			input:    `{"action":"members","chat_id":"oc_test"}`,
+			contains: []string{`"member_id": "ou_member_1"`, `"member_total": 1`},
+		},
+		{
 			name:     "wiki spaces",
 			tool:     &FeishuWikiTool{Cfg: cfg},
 			input:    `{"action":"spaces"}`,
 			contains: []string{`"space_id": "spc_1"`, `"name": "Mock Space"`},
+		},
+		{
+			name:     "wiki nodes",
+			tool:     &FeishuWikiTool{Cfg: cfg},
+			input:    `{"action":"nodes","space_id":"spc_1"}`,
+			contains: []string{`"node_token": "n_1"`, `"obj_token": "doc_1"`},
+		},
+		{
+			name:     "wiki get",
+			tool:     &FeishuWikiTool{Cfg: cfg},
+			input:    `{"action":"get","token":"n_1"}`,
+			contains: []string{`"node_token": "n_1"`, `"title": "Mock Node"`},
+		},
+		{
+			name:     "wiki create",
+			tool:     &FeishuWikiTool{Cfg: cfg},
+			input:    `{"action":"create","space_id":"spc_1","title":"New Node"}`,
+			contains: []string{`"node_token": "n_created"`, `"title": "New Node"`},
+		},
+		{
+			name:     "wiki move",
+			tool:     &FeishuWikiTool{Cfg: cfg},
+			input:    `{"action":"move","space_id":"spc_1","node_token":"n_1","target_space_id":"spc_2","target_parent_token":"p_2"}`,
+			contains: []string{`"success": true`, `"node_token": "n_1"`},
+		},
+		{
+			name:     "wiki rename",
+			tool:     &FeishuWikiTool{Cfg: cfg},
+			input:    `{"action":"rename","space_id":"spc_1","node_token":"n_1","title":"Renamed Node"}`,
+			contains: []string{`"success": true`, `"title": "Renamed Node"`},
 		},
 		{
 			name:     "drive list",
@@ -211,10 +247,70 @@ func TestFeishuToolsSmokeWithMockServer(t *testing.T) {
 			contains: []string{`"token": "fil_1"`, `"name": "Mock File"`},
 		},
 		{
+			name:     "drive info",
+			tool:     &FeishuDriveTool{Cfg: cfg},
+			input:    `{"action":"info","file_token":"fil_1"}`,
+			contains: []string{`"token": "fil_1"`, `"name": "Mock File"`},
+		},
+		{
+			name:     "drive create folder",
+			tool:     &FeishuDriveTool{Cfg: cfg},
+			input:    `{"action":"create_folder","folder_token":"0","name":"New Folder"}`,
+			contains: []string{`"token": "fld_1"`, `"url": "https://example.com/folder"`},
+		},
+		{
+			name:     "drive move",
+			tool:     &FeishuDriveTool{Cfg: cfg},
+			input:    `{"action":"move","file_token":"fil_1","folder_token":"fld_1","type":"file"}`,
+			contains: []string{`"success": true`, `"task_id": "task_move_1"`},
+		},
+		{
+			name:     "drive delete",
+			tool:     &FeishuDriveTool{Cfg: cfg},
+			input:    `{"action":"delete","file_token":"fil_1","type":"file"}`,
+			contains: []string{`"success": true`, `"task_id": "task_del_1"`},
+		},
+		{
+			name:     "doc create",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"create","title":"Mock New Doc","folder_token":"fld_1"}`,
+			contains: []string{`"document_id": "d_created"`, `"title": "Mock New Doc"`},
+		},
+		{
 			name:     "doc read",
 			tool:     &FeishuDocTool{Cfg: cfg},
 			input:    `{"action":"read","document_id":"d1"}`,
 			contains: []string{`"document_id": "d1"`, `"raw_content": "mock raw content"`},
+		},
+		{
+			name:     "doc get block",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"get_block","document_id":"d1","block_id":"b1"}`,
+			contains: []string{`"block_id": "b1"`, `"text": "mock block text"`},
+		},
+		{
+			name:     "doc list children",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"list_children","document_id":"d1","parent_block_id":"b_parent"}`,
+			contains: []string{`"parent_block_id": "b_parent"`, `"block_id": "b_child_1"`},
+		},
+		{
+			name:     "doc append text",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"append_text","document_id":"d1","parent_block_id":"b_parent","text":"append text"}`,
+			contains: []string{`"document_revision_id": 3`, `"block_id": "b_appended_1"`},
+		},
+		{
+			name:     "doc update text",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"update_text","document_id":"d1","block_id":"b1","text":"updated text"}`,
+			contains: []string{`"block_id": "b1"`, `"document_revision_id": 4`},
+		},
+		{
+			name:     "doc delete children range",
+			tool:     &FeishuDocTool{Cfg: cfg},
+			input:    `{"action":"delete_children_range","document_id":"d1","parent_block_id":"b_parent","start_index":0,"end_index":1}`,
+			contains: []string{`"success": true`, `"document_revision_id": 5`},
 		},
 		{
 			name:     "bitable meta",
@@ -223,10 +319,70 @@ func TestFeishuToolsSmokeWithMockServer(t *testing.T) {
 			contains: []string{`"app_token": "app1"`, `"name": "Mock App"`},
 		},
 		{
+			name:     "bitable create app",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"create_app","name":"Mock New App","folder_token":"fld_1","time_zone":"Asia/Shanghai"}`,
+			contains: []string{`"app_token": "app_created"`, `"name": "Mock New App"`},
+		},
+		{
+			name:     "bitable list tables",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"list_tables","app_token":"app1"}`,
+			contains: []string{`"table_id": "tbl1"`, `"name": "Mock Table"`},
+		},
+		{
+			name:     "bitable list fields",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"list_fields","app_token":"app1","table_id":"tbl1"}`,
+			contains: []string{`"field_id": "fld1"`, `"field_name": "Name"`},
+		},
+		{
+			name:     "bitable create field",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"create_field","app_token":"app1","table_id":"tbl1","field_name":"Score","field_type":2}`,
+			contains: []string{`"field_id": "fld_created"`, `"field_name": "Score"`},
+		},
+		{
+			name:     "bitable list records",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"list_records","app_token":"app1","table_id":"tbl1"}`,
+			contains: []string{`"record_id": "rec1"`, `"Name": "Alice"`},
+		},
+		{
+			name:     "bitable get record",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"get_record","app_token":"app1","table_id":"tbl1","record_id":"rec1"}`,
+			contains: []string{`"record_id": "rec1"`, `"Name": "Alice"`},
+		},
+		{
+			name:     "bitable create record",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"create_record","app_token":"app1","table_id":"tbl1","fields":{"Name":"Bob"}}`,
+			contains: []string{`"record_id": "rec_created"`, `"Name": "Bob"`},
+		},
+		{
+			name:     "bitable update record",
+			tool:     &FeishuBitableTool{Cfg: cfg},
+			input:    `{"action":"update_record","app_token":"app1","table_id":"tbl1","record_id":"rec1","fields":{"Name":"Charlie"}}`,
+			contains: []string{`"record_id": "rec1"`, `"Name": "Charlie"`},
+		},
+		{
 			name:     "perm list",
 			tool:     &FeishuPermTool{Cfg: cfg},
 			input:    `{"action":"list","token":"doc1","file_type":"doc"}`,
 			contains: []string{`"member_id": "ou_123"`, `"perm": "view"`},
+		},
+		{
+			name:     "perm add",
+			tool:     &FeishuPermTool{Cfg: cfg},
+			input:    `{"action":"add","token":"doc1","file_type":"doc","member_type":"open_id","member_id":"ou_123","perm":"edit"}`,
+			contains: []string{`"success": true`, `"perm": "edit"`},
+		},
+		{
+			name:     "perm remove",
+			tool:     &FeishuPermTool{Cfg: cfg},
+			input:    `{"action":"remove","token":"doc1","file_type":"doc","member_type":"open_id","member_id":"ou_123"}`,
+			contains: []string{`"success": true`, `"member_id": "ou_123"`},
 		},
 	}
 
@@ -325,6 +481,25 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 				},
 			})
 			return
+		case "/open-apis/im/v1/chats/oc_test/members":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"member_id":      "ou_member_1",
+							"name":           "Member One",
+							"tenant_key":     "t_mock",
+							"member_id_type": "open_id",
+						},
+					},
+					"has_more":     false,
+					"page_token":   "",
+					"member_total": 1,
+				},
+			})
+			return
 
 		case "/open-apis/wiki/v2/spaces":
 			writeJSON(w, map[string]any{
@@ -342,6 +517,76 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 					"has_more":   false,
 					"page_token": "",
 				},
+			})
+			return
+		case "/open-apis/wiki/v2/spaces/spc_1/nodes":
+			if r.Method == http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"items": []map[string]any{
+							{
+								"node_token": "n_1",
+								"obj_token":  "doc_1",
+								"obj_type":   "docx",
+								"title":      "Mock Node",
+								"has_child":  false,
+							},
+						},
+						"has_more":   false,
+						"page_token": "",
+					},
+				})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"node": map[string]any{
+						"node_token": "n_created",
+						"obj_token":  "doc_created",
+						"obj_type":   "docx",
+						"title":      "New Node",
+					},
+				},
+			})
+			return
+		case "/open-apis/wiki/v2/spaces/get_node":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"node": map[string]any{
+						"node_token":        "n_1",
+						"space_id":          "spc_1",
+						"obj_token":         "doc_1",
+						"obj_type":          "docx",
+						"title":             "Mock Node",
+						"parent_node_token": "p_1",
+						"has_child":         false,
+						"creator":           "ou_owner",
+						"node_create_time":  "1700000000",
+					},
+				},
+			})
+			return
+		case "/open-apis/wiki/v2/spaces/spc_1/nodes/n_1/move":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"node": map[string]any{
+						"node_token": "n_1",
+					},
+				},
+			})
+			return
+		case "/open-apis/wiki/v2/spaces/spc_1/nodes/n_1/update_title":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
 			})
 			return
 
@@ -366,6 +611,47 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 				},
 			})
 			return
+		case "/open-apis/drive/v1/files/create_folder":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"token": "fld_1",
+					"url":   "https://example.com/folder",
+				},
+			})
+			return
+		case "/open-apis/drive/v1/files/fil_1/move":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"task_id": "task_move_1",
+				},
+			})
+			return
+		case "/open-apis/drive/v1/files/fil_1":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"task_id": "task_del_1",
+				},
+			})
+			return
+		case "/open-apis/docx/v1/documents":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"document": map[string]any{
+						"document_id": "d_created",
+						"revision_id": 1,
+						"title":       "Mock New Doc",
+					},
+				},
+			})
+			return
 
 		case "/open-apis/docx/v1/documents/d1":
 			writeJSON(w, map[string]any{
@@ -377,6 +663,93 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 						"revision_id": 1,
 						"title":       "Mock Doc",
 					},
+				},
+			})
+			return
+		case "/open-apis/docx/v1/documents/d1/blocks/b1":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"block": map[string]any{
+						"block_id":   "b1",
+						"parent_id":  "b_parent",
+						"children":   []string{},
+						"block_type": 2,
+						"text": map[string]any{
+							"elements": []map[string]any{
+								{
+									"text_run": map[string]any{
+										"content": "mock block text",
+									},
+								},
+							},
+						},
+					},
+					"document_revision_id": 4,
+				},
+			})
+			return
+		case "/open-apis/docx/v1/documents/d1/blocks/b_parent/children":
+			if r.Method == http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"items": []map[string]any{
+							{
+								"block_id":   "b_child_1",
+								"parent_id":  "b_parent",
+								"children":   []string{},
+								"block_type": 2,
+								"text": map[string]any{
+									"elements": []map[string]any{
+										{
+											"text_run": map[string]any{
+												"content": "child text",
+											},
+										},
+									},
+								},
+							},
+						},
+						"page_token": "",
+						"has_more":   false,
+					},
+				})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"children": []map[string]any{
+						{
+							"block_id":   "b_appended_1",
+							"parent_id":  "b_parent",
+							"children":   []string{},
+							"block_type": 2,
+							"text": map[string]any{
+								"elements": []map[string]any{
+									{
+										"text_run": map[string]any{
+											"content": "append text",
+										},
+									},
+								},
+							},
+						},
+					},
+					"document_revision_id": 3,
+				},
+			})
+			return
+		case "/open-apis/docx/v1/documents/d1/blocks/b_parent/children/batch_delete":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"document_revision_id": 5,
 				},
 			})
 			return
@@ -408,8 +781,168 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 				},
 			})
 			return
+		case "/open-apis/bitable/v1/apps":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"app": map[string]any{
+						"app_token":        "app_created",
+						"name":             "Mock New App",
+						"revision":         1,
+						"folder_token":     "fld_1",
+						"url":              "https://example.com/bitable",
+						"default_table_id": "tbl1",
+						"time_zone":        "Asia/Shanghai",
+					},
+				},
+			})
+			return
+		case "/open-apis/bitable/v1/apps/app1/tables":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"has_more":   false,
+					"page_token": "",
+					"total":      1,
+					"items": []map[string]any{
+						{
+							"table_id": "tbl1",
+							"name":     "Mock Table",
+							"revision": 1,
+						},
+					},
+				},
+			})
+			return
+		case "/open-apis/bitable/v1/apps/app1/tables/tbl1/fields":
+			if r.Method == http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"has_more":   false,
+						"page_token": "",
+						"total":      1,
+						"items": []map[string]any{
+							{
+								"field_id":   "fld1",
+								"field_name": "Name",
+								"type":       1,
+								"ui_type":    "Text",
+								"is_primary": true,
+								"is_hidden":  false,
+							},
+						},
+					},
+				})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"field": map[string]any{
+						"field_id":   "fld_created",
+						"field_name": "Score",
+						"type":       2,
+						"ui_type":    "Number",
+						"is_primary": false,
+						"is_hidden":  false,
+					},
+				},
+			})
+			return
+		case "/open-apis/bitable/v1/apps/app1/tables/tbl1/records":
+			if r.Method == http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"has_more":   false,
+						"page_token": "",
+						"total":      1,
+						"items": []map[string]any{
+							{
+								"record_id": "rec1",
+								"fields": map[string]any{
+									"Name": "Alice",
+								},
+								"created_time":       1700000000000,
+								"last_modified_time": 1700000000000,
+							},
+						},
+					},
+				})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"record": map[string]any{
+						"record_id": "rec_created",
+						"fields": map[string]any{
+							"Name": "Bob",
+						},
+						"created_time":       1700000000001,
+						"last_modified_time": 1700000000001,
+					},
+				},
+			})
+			return
+		case "/open-apis/bitable/v1/apps/app1/tables/tbl1/records/rec1":
+			if r.Method == http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"record": map[string]any{
+							"record_id": "rec1",
+							"fields": map[string]any{
+								"Name": "Alice",
+							},
+							"created_time":       1700000000000,
+							"last_modified_time": 1700000000000,
+						},
+					},
+				})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{
+					"record": map[string]any{
+						"record_id": "rec1",
+						"fields": map[string]any{
+							"Name": "Charlie",
+						},
+						"created_time":       1700000000000,
+						"last_modified_time": 1700000000002,
+					},
+				},
+			})
+			return
 
 		case "/open-apis/drive/v1/permissions/doc1/members":
+			if r.Method != http.MethodGet {
+				writeJSON(w, map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"member": map[string]any{
+							"member_type": "openid",
+							"member_id":   "ou_123",
+							"perm":        "edit",
+							"perm_type":   "container",
+							"type":        "user",
+						},
+					},
+				})
+				return
+			}
 			writeJSON(w, map[string]any{
 				"code": 0,
 				"msg":  "ok",
@@ -426,6 +959,12 @@ func newMockFeishuServer(t *testing.T, override func(http.ResponseWriter, *http.
 						},
 					},
 				},
+			})
+			return
+		case "/open-apis/drive/v1/permissions/doc1/members/ou_123":
+			writeJSON(w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
 			})
 			return
 		}

@@ -62,6 +62,7 @@ Goal: bring `goclaw` Feishu support closer to OpenClaw's Feishu plugin capabilit
   - exponential backoff (`200ms`, `400ms`, `800ms`)
 - Added mock-server smoke tests that execute one real action for each Feishu tool:
   - `feishu_chat`, `feishu_wiki`, `feishu_drive`, `feishu_doc`, `feishu_bitable`, `feishu_perm`
+- Extended test coverage to action-level execution for all current Feishu tool actions (32 actions in total) with mocked OpenAPI responses.
 - Added retry behavior test (first request `502`, second success) to verify retry path.
 - Added user-facing usage/scope doc:
   - `docs/FEISHU_TOOL_USAGE.md`
@@ -102,8 +103,7 @@ Related files:
 
 ## TODO
 
-- [ ] Extend smoke tests from "one action per tool" to "all actions per tool" coverage.
-- [ ] Introduce per-resource typed Feishu API interfaces (chat/wiki/drive/docx/bitable/perm) for deeper unit-level mocking.
+- [ ] Introduce per-resource typed Feishu API interfaces (chat/wiki/drive/docx/bitable/perm) for deeper unit-level mocking and finer-grained failure simulation.
 
 ## Notes for next session
 
