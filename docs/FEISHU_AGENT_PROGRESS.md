@@ -54,11 +54,27 @@ Goal: bring `goclaw` Feishu support closer to OpenClaw's Feishu plugin capabilit
   - bitable field-type validation
   - permission file/member type normalization
 
+### Phase 3.5 - Reliability and testability hardening (completed)
+
+- Added shared Feishu HTTP retry policy in tool client path:
+  - retries on `429/500/502/503/504`
+  - retries on transient network errors (timeout/reset/EOF class)
+  - exponential backoff (`200ms`, `400ms`, `800ms`)
+- Added mock-server smoke tests that execute one real action for each Feishu tool:
+  - `feishu_chat`, `feishu_wiki`, `feishu_drive`, `feishu_doc`, `feishu_bitable`, `feishu_perm`
+- Added retry behavior test (first request `502`, second success) to verify retry path.
+- Added user-facing usage/scope doc:
+  - `docs/FEISHU_TOOL_USAGE.md`
+- Added optional Feishu base URL override:
+  - config field `channels.feishu.openBaseURL`
+  - env `FEISHU_OPEN_BASE_URL`
+
 Related files:
 
 - `cmd/clawdbot/main.go`
 - `internal/agent/loop.go`
 - `internal/assets/workspace/README.md`
+- `docs/FEISHU_TOOL_USAGE.md`
 - `internal/tools/feishu_tools.go`
 - `internal/tools/feishu_tools_phase3.go`
 - `internal/tools/feishu_tools_test.go`
@@ -86,10 +102,8 @@ Related files:
 
 ## TODO
 
-- [ ] Add integration tests (or smoke tests) for each Feishu tool action with mocked SDK responses.
-- [ ] Introduce a lightweight Feishu API client abstraction for easier mocking and retry/error policy consistency.
-- [ ] Add user-facing docs for tool usage examples and required Feishu scopes.
-- [ ] Add retries / rate-limit handling / transient error policy for Feishu API calls.
+- [ ] Extend smoke tests from "one action per tool" to "all actions per tool" coverage.
+- [ ] Introduce per-resource typed Feishu API interfaces (chat/wiki/drive/docx/bitable/perm) for deeper unit-level mocking.
 
 ## Notes for next session
 

@@ -78,6 +78,8 @@ type FeishuConfig struct {
 	AppSecret string `json:"appSecret"`
 	// lark (国际版) vs feishu (国内版). 默认: feishu
 	Domain string `json:"domain"`
+	// 可选：覆盖 OpenAPI Base URL（主要用于测试/代理）。
+	OpenBaseURL string `json:"openBaseURL"`
 }
 
 type TelegramConfig struct {
@@ -195,6 +197,9 @@ func overlayEnv(cfg *Config) {
 	}
 	if v := os.Getenv("FEISHU_DOMAIN"); v != "" {
 		cfg.Channels.Feishu.Domain = v
+	}
+	if v := os.Getenv("FEISHU_OPEN_BASE_URL"); v != "" {
+		cfg.Channels.Feishu.OpenBaseURL = v
 	}
 	if v := os.Getenv("TELEGRAM_BOT_TOKEN"); v != "" {
 		cfg.Channels.Telegram.Token = v

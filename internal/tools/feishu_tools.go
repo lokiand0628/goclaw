@@ -1,9 +1,14 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -17,7 +22,9 @@ import (
 )
 
 const (
-	feishuDefaultTimeout = 20 * time.Second
+	feishuDefaultTimeout       = 20 * time.Second
+	feishuHTTPRetryAttempts    = 3
+	feishuHTTPRetryBaseBackoff = 200 * time.Millisecond
 )
 
 // RegisterFeishuTools 注册飞书相关的 Agent 工具。
@@ -70,12 +77,166 @@ func (b *feishuToolBase) newClient() (*lark.Client, error) {
 		return nil, fmt.Errorf("飞书 appId / appSecret 未配置")
 	}
 
-	opts := []lark.ClientOptionFunc{lark.WithLogLevel(larkcore.LogLevelWarn)}
-	if strings.EqualFold(strings.TrimSpace(fc.Domain), "lark") {
+	opts := []lark.ClientOptionFunc{
+		lark.WithLogLevel(larkcore.LogLevelWarn),
+		lark.WithHttpClient(newFeishuRetryHTTPClient()),
+	}
+	if strings.TrimSpace(fc.OpenBaseURL) != "" {
+		opts = append(opts, lark.WithOpenBaseUrl(strings.TrimSpace(fc.OpenBaseURL)))
+	} else if strings.EqualFold(strings.TrimSpace(fc.Domain), "lark") {
 		opts = append(opts, lark.WithOpenBaseUrl("https://open.larksuite.com"))
 	}
 
 	return lark.NewClient(fc.AppID, fc.AppSecret, opts...), nil
+}
+
+type feishuRetryHTTPClient struct {
+	base        *http.Client
+	maxAttempts int
+	baseBackoff time.Duration
+}
+
+func newFeishuRetryHTTPClient() *feishuRetryHTTPClient {
+	return &feishuRetryHTTPClient{
+		base:        http.DefaultClient,
+		maxAttempts: feishuHTTPRetryAttempts,
+		baseBackoff: feishuHTTPRetryBaseBackoff,
+	}
+}
+
+func (c *feishuRetryHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if c == nil {
+		return http.DefaultClient.Do(req)
+	}
+	base := c.base
+	if base == nil {
+		base = http.DefaultClient
+	}
+	maxAttempts := c.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	baseBackoff := c.baseBackoff
+	if baseBackoff <= 0 {
+		baseBackoff = 100 * time.Millisecond
+	}
+
+	bodyBytes, err := snapshotRequestBody(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		creq := cloneRequestWithBody(req, bodyBytes)
+		resp, err := base.Do(creq)
+		if err != nil {
+			lastErr = err
+			if attempt == maxAttempts || !isRetryableHTTPError(err) {
+				return nil, err
+			}
+			if waitErr := sleepWithContext(req.Context(), retryBackoff(baseBackoff, attempt)); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+
+		if attempt < maxAttempts && isRetryableStatusCode(resp.StatusCode) {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if waitErr := sleepWithContext(req.Context(), retryBackoff(baseBackoff, attempt)); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+		return resp, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("feishu retry http client: exhausted retries")
+}
+
+func snapshotRequestBody(req *http.Request) ([]byte, error) {
+	if req == nil || req.Body == nil {
+		return nil, nil
+	}
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	return bodyBytes, nil
+}
+
+func cloneRequestWithBody(req *http.Request, body []byte) *http.Request {
+	if req == nil {
+		return nil
+	}
+	clone := req.Clone(req.Context())
+	if body != nil {
+		clone.Body = io.NopCloser(bytes.NewReader(body))
+		clone.ContentLength = int64(len(body))
+	}
+	return clone
+}
+
+func isRetryableStatusCode(status int) bool {
+	return status == http.StatusTooManyRequests ||
+		status == http.StatusInternalServerError ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
+}
+
+func isRetryableHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, token := range []string{
+		"timeout",
+		"temporarily unavailable",
+		"connection reset",
+		"broken pipe",
+		"eof",
+		"tls handshake timeout",
+	} {
+		if strings.Contains(msg, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func retryBackoff(base time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	return base * time.Duration(1<<(attempt-1))
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func feishuCallCtx() (context.Context, context.CancelFunc) {

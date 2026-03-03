@@ -34,7 +34,9 @@ func New(cfg *config.Config) (*Adapter, error) {
 	opts := []lark.ClientOptionFunc{
 		lark.WithLogLevel(larkcore.LogLevelWarn),
 	}
-	if fc.Domain == "lark" {
+	if strings.TrimSpace(fc.OpenBaseURL) != "" {
+		opts = append(opts, lark.WithOpenBaseUrl(strings.TrimSpace(fc.OpenBaseURL)))
+	} else if fc.Domain == "lark" {
 		opts = append(opts, lark.WithOpenBaseUrl("https://open.larksuite.com"))
 	}
 

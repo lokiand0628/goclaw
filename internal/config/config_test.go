@@ -51,3 +51,16 @@ func TestParseLegacyProvidersIncludesOpenAI(t *testing.T) {
 		t.Fatalf("expected openai type, got %q", p.APIType)
 	}
 }
+
+func TestOverlayEnvFeishuOpenBaseURL(t *testing.T) {
+	t.Setenv("FEISHU_APP_ID", "cli_test")
+	t.Setenv("FEISHU_APP_SECRET", "sec_test")
+	t.Setenv("FEISHU_OPEN_BASE_URL", "http://127.0.0.1:19090")
+
+	cfg := defaults()
+	overlayEnv(cfg)
+
+	if cfg.Channels.Feishu.OpenBaseURL != "http://127.0.0.1:19090" {
+		t.Fatalf("FEISHU_OPEN_BASE_URL not applied, got %q", cfg.Channels.Feishu.OpenBaseURL)
+	}
+}
