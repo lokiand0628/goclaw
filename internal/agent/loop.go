@@ -77,6 +77,12 @@ func New(cfg Config) *Agent {
 	}
 }
 
+// ID 返回代理 ID（只读）。
+func (a *Agent) ID() string { return a.id }
+
+// Name 返回代理名称（只读）。
+func (a *Agent) Name() string { return a.name }
+
 // estimateTokens 粗略估算消息列表的 token 数量。
 // 非 ASCII 字符（中文等）约 1 token/字，ASCII 约 1 token/4字符。
 // 这是保守估算，用于触发压缩，不追求精确。

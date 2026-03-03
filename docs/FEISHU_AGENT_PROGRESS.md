@@ -8,6 +8,19 @@ Goal: bring `goclaw` Feishu support closer to OpenClaw's Feishu plugin capabilit
 
 ## Progress (Done)
 
+### Phase 2 - Wire-up and runtime integration (completed)
+
+- Added runtime bootstrap entry:
+  - `cmd/clawdbot/main.go`
+  - commands: `start`, `sessions list`, `rollback [tag]`, `rollback list`
+- Wired Feishu tools into real startup path:
+  - runtime now calls `RegisterFeishuTools(...)` during tool registry initialization
+  - startup logs explicitly report Feishu tool registration status
+- Integrated runtime toolset and scheduler bindings:
+  - core tools + Feishu tools are visible to all configured agents
+  - `manage_cron` now binds to `scheduler.CronScheduler` at runtime
+- Added minimal embedded workspace template file so `internal/assets` embed can compile in current checkout.
+
 ### Phase 1 - Core tools scaffold (completed)
 
 - Added new Feishu agent tools in Go:
@@ -43,6 +56,9 @@ Goal: bring `goclaw` Feishu support closer to OpenClaw's Feishu plugin capabilit
 
 Related files:
 
+- `cmd/clawdbot/main.go`
+- `internal/agent/loop.go`
+- `internal/assets/workspace/README.md`
 - `internal/tools/feishu_tools.go`
 - `internal/tools/feishu_tools_phase3.go`
 - `internal/tools/feishu_tools_test.go`
@@ -50,17 +66,10 @@ Related files:
 ## Verification
 
 - Passed:
-  - `go test ./internal/tools ./internal/agent`
-- Known existing repo-level issue (not introduced by this phase):
-  - `go test ./...` fails at `internal/assets/assets.go` because `//go:embed workspace/*` has no matching files in current checkout.
+  - `go test ./...`
+  - `go build -o /tmp/goclaw-build ./cmd/clawdbot/`
 
 ## Plan
-
-### Phase 2 - Wire-up and runtime integration
-
-1. Integrate `RegisterFeishuTools(...)` into actual runtime/tool bootstrap path.
-2. Ensure all agents that should use Feishu tools can see these tool definitions.
-3. Add startup logs for Feishu tool registration success/failure.
 
 ### Phase 3 - Deepen tool behaviors
 
@@ -77,7 +86,6 @@ Related files:
 
 ## TODO
 
-- [ ] Find and patch the actual tool bootstrap code path (`cmd/clawdbot` or equivalent runtime entry) to call `RegisterFeishuTools`.
 - [ ] Add integration tests (or smoke tests) for each Feishu tool action with mocked SDK responses.
 - [ ] Introduce a lightweight Feishu API client abstraction for easier mocking and retry/error policy consistency.
 - [ ] Add user-facing docs for tool usage examples and required Feishu scopes.
@@ -85,5 +93,5 @@ Related files:
 
 ## Notes for next session
 
-- Core Feishu tool surface is now implemented in tools layer; runtime exposure still depends on bootstrap wiring.
+- Feishu tools are now wired into runtime bootstrap and exposed in agent tool registry.
 - Keep tool action names stable to avoid prompt/tool-schema churn.

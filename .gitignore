@@ -3,6 +3,9 @@ goclaw
 clawdbot
 *.exe
 *.test
+!cmd/
+!cmd/clawdbot/
+!cmd/clawdbot/main.go
 
 # Environment variables
 .env
@@ -23,6 +26,8 @@ clawdbot.db
 
 # Workspace (Local Instance)
 workspace/
+!internal/assets/workspace/
+!internal/assets/workspace/README.md
 
 # OS specific
 .DS_Store
