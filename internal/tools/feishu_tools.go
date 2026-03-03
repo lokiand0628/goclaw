@@ -26,6 +26,9 @@ const (
 // - feishu_chat
 // - feishu_wiki
 // - feishu_drive
+// - feishu_doc
+// - feishu_bitable
+// - feishu_perm
 func RegisterFeishuTools(reg *Registry, cfg *config.Config) error {
 	if reg == nil {
 		return fmt.Errorf("registry 不能为空")
@@ -42,6 +45,9 @@ func RegisterFeishuTools(reg *Registry, cfg *config.Config) error {
 		&FeishuChatTool{Cfg: cfg},
 		&FeishuWikiTool{Cfg: cfg},
 		&FeishuDriveTool{Cfg: cfg},
+		&FeishuDocTool{Cfg: cfg},
+		&FeishuBitableTool{Cfg: cfg},
+		&FeishuPermTool{Cfg: cfg},
 	}
 	for _, t := range tools {
 		if err := reg.Register(t); err != nil {
